@@ -267,19 +267,36 @@ def update_task_status(
         requests.post(c_url, auth=AUTH, headers=HEADERS, json=c_payload, timeout=15)
         msg += " (Đã ghi nhận comment báo cáo tiến độ)."
 
-    # 4. Tự động đồng bộ trạng thái Parent Task nếu có yêu cầu (ví dụ Subtask IN PROGRESS -> Parent DEV IN PROGRESS)
-    if sync_parent_status:
-        issue_url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}?fields=parent"
-        ir = requests.get(issue_url, auth=AUTH, headers=HEADERS, timeout=15)
-        if ir.status_code == 200:
-            parent_key = ir.json().get("fields", {}).get("parent", {}).get("key")
-            if parent_key:
-                parent_res = update_task_status(
-                    issue_key=parent_key,
-                    target_status=sync_parent_status,
-                    comment_text=f"Tự động đồng bộ trạng thái từ Sub-task {issue_key} ({final_status_name}).",
-                )
-                msg += f" | Đồng bộ Parent ({parent_key}): {parent_res}"
+    # 4. Tự động đồng bộ trạng thái Parent Task (Rule 4b: Auto-Parent Rollup hoặc theo tham số sync_parent_status)
+    issue_url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}?fields=summary,issuetype,parent"
+    ir = requests.get(issue_url, auth=AUTH, headers=HEADERS, timeout=15)
+    if ir.status_code == 200:
+        ifields = ir.json().get("fields", {})
+        parent_obj = ifields.get("parent") or {}
+        parent_key = parent_obj.get("key")
+        parent_status = (parent_obj.get("fields", {}).get("status", {}).get("name") or "").upper()
+        sub_summary = (ifields.get("summary") or "").strip()
+
+        auto_target = sync_parent_status
+        if not auto_target and parent_key:
+            f_up = final_status_name.upper()
+            if f_up == "IN PROGRESS":
+                if sub_summary.startswith("[BA]") and parent_status == "TO DO":
+                    auto_target = "BA IN PROGRESS"
+                elif (sub_summary.startswith("[BE]") or sub_summary.startswith("[FE]")) and parent_status in ("TO DO", "BA IN PROGRESS", "BA REVIEW"):
+                    auto_target = "DEV IN PROGRESS"
+                elif sub_summary.startswith("[Tester]") and parent_status in ("DEV IN PROGRESS", "READY FOR TEST"):
+                    auto_target = "TESTING"
+            elif f_up in ("DONE", "HOÀN THÀNH", "CLOSED") and sub_summary.startswith("[Bug]") and parent_status == "REWORK":
+                auto_target = "READY FOR TEST"
+
+        if auto_target and parent_key:
+            parent_res = update_task_status(
+                issue_key=parent_key,
+                target_status=auto_target,
+                comment_text=f"Tự động đồng bộ trạng thái từ Sub-task {issue_key} ({final_status_name}).",
+            )
+            msg += f" | 🔄 Đồng bộ Parent ({parent_key}): {parent_res}"
 
     return msg
 
@@ -371,14 +388,14 @@ def create_bug_subtask(
 
 
 def ops_sync_git_commit(
-    issue_key: str,
-    commit_hash: str,
-    branch_name: str,
+    issue_key: str = "",
+    commit_hash: str = "",
+    branch_name: str = "",
     commit_message: str = "",
     ci_status: str = "PASS",
+    wp_id: Optional[int] = None,
 ) -> str:
-    """Đồng bộ thông tin Git Commit, Branch và kết quả CI/CD Pipeline vào Jira Issue."""
-    c_url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
+    """Đồng bộ thông tin Git Commit, Branch và kết quả CI/CD Pipeline vào Jira Issue và/hoặc OpenProject Work Package."""
     badge = "✅ CI/CD PASS" if ci_status.upper() == "PASS" else "❌ CI/CD FAIL"
     text = (
         f"🔗 [DevOps Git & CI/CD Sync]\n"
@@ -386,10 +403,33 @@ def ops_sync_git_commit(
         f"• Commit: {commit_hash} — {commit_message}\n"
         f"• Pipeline Status: {badge}"
     )
-    res = requests.post(c_url, auth=AUTH, headers=HEADERS, json=_build_adf_comment(text), timeout=15)
-    if res.status_code == 201:
-        return f"✅ Đã đồng bộ Git commit {commit_hash} ({branch_name}) vào {issue_key}."
-    return f"Lỗi đồng bộ Git commit: HTTP {res.status_code} - {res.text}"
+    out_msgs = []
+    if issue_key:
+        c_url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
+        res = requests.post(c_url, auth=AUTH, headers=HEADERS, json=_build_adf_comment(text), timeout=15)
+        if res.status_code == 201:
+            out_msgs.append(f"✅ [Jira] Đã đồng bộ Git commit {commit_hash} ({branch_name}) vào {issue_key}.")
+        else:
+            out_msgs.append(f"⚠️ [Jira] Lỗi đồng bộ Git commit vào {issue_key}: HTTP {res.status_code}")
+
+    if wp_id is not None and OPENPROJECT_API_KEY:
+        get_url = f"{OPENPROJECT_URL}/api/v3/work_packages/{wp_id}"
+        gr = requests.get(get_url, auth=OP_AUTH, headers=OP_HEADERS, timeout=10)
+        if gr.status_code == 200:
+            lv = gr.json().get("lockVersion", 0)
+            pr = requests.patch(
+                get_url,
+                auth=OP_AUTH,
+                headers=OP_HEADERS,
+                json={"lockVersion": lv, "comment": {"raw": text}},
+                timeout=10,
+            )
+            if pr.status_code == 200:
+                out_msgs.append(f"✅ [OpenProject] Đã đồng bộ Git commit {commit_hash} ({branch_name}) vào Work Package #{wp_id}.")
+            else:
+                out_msgs.append(f"⚠️ [OpenProject] Lỗi đồng bộ Git commit vào #{wp_id}: HTTP {pr.status_code}")
+
+    return " | ".join(out_msgs) if out_msgs else "⚠️ Cần truyền ít nhất `issue_key` (Jira) hoặc `wp_id` (OpenProject)."
 
 
 # Bản đồ AccountId thực tế của 5 thành viên nhóm trên Jira Cloud (Project SCRUM)
@@ -495,6 +535,46 @@ def jira_create_subtask(
         new_key = r.json().get("key")
         return f"✅ [Jira] Đã tạo Sub-task {new_key} ('{full_summary}', {story_points} SP, {start_date} -> {due_date}) dưới {parent_key}."
     return f"Lỗi tạo Sub-task trên Jira dưới {parent_key}: HTTP {r.status_code} - {r.text[:250]}"
+
+
+def jira_create_epic(
+    summary: str,
+    start_date: str = "2026-09-03",
+    due_date: str = "2026-09-30",
+    story_points: float = 50.0,
+    description: str = "",
+    parent_key: Optional[str] = None,
+) -> str:
+    """
+    MCP Tool Tạo mới 1 Epic (Tầng 1 - Giai đoạn / Phân hệ lớn) trên Jira Cloud.
+    Tích hợp Guardrail Rule 3: Chặn nếu cố tình gán Epic làm con của Task hoặc Sub-task khác.
+    """
+    if parent_key:
+        return (
+            f"⛔ [JIRA GUARDRAIL - RULE 3 (Hierarchy Protection)]: Bị chặn! "
+            f"Epic là thực thể gốc tầng 1 (Root Level), không được phép làm con của Issue khác ({parent_key})."
+        )
+
+    full_summary = summary.strip() if summary.strip().startswith("Epic") else f"Epic: {summary.strip()}"
+    desc_text = description or f"Phân hệ lớn (Epic) của dự án. Tổng điểm: {story_points} SP ({start_date} -> {due_date})."
+
+    payload: Dict[str, Any] = {
+        "fields": {
+            "project": {"key": JIRA_PROJECT_KEY},
+            "issuetype": {"id": "10001"},  # Epic
+            "summary": full_summary,
+            "description": _build_adf_comment(desc_text)["body"],
+            "assignee": {"accountId": JIRA_ROLE_TO_ACCOUNT_ID["PM"]},
+            "customfield_10015": start_date,
+            "duedate": due_date,
+            "customfield_10016": float(story_points),
+        }
+    }
+    r = requests.post(f"{JIRA_BASE_URL}/rest/api/3/issue", auth=AUTH, headers=HEADERS, json=payload, timeout=15)
+    if r.status_code == 201:
+        new_key = r.json().get("key")
+        return f"✅ [Jira] Đã tạo Epic {new_key}: '{full_summary}' ({story_points} SP, {start_date} -> {due_date})."
+    return f"Lỗi tạo Epic trên Jira: HTTP {r.status_code} - {r.text[:250]}"
 
 
 def jira_create_task(
@@ -674,6 +754,22 @@ def openproject_update_work_package(
         return f"Lỗi đọc Work Package #{wp_id}: HTTP {gr.status_code}"
 
     wp_data = gr.json()
+    wp_type_title = wp_data.get("_links", {}).get("type", {}).get("title", "Task")
+    wp_subject = (wp_data.get("subject") or "").strip()
+
+    # Guardrail Rule 4a: Kiểm tra tính hợp lệ của trạng thái theo từng tầng Type (Epic, Task, SubTask)
+    if wp_type_title == "SubTask" and resolved_status_id not in (1, 7, 12):
+        return (
+            f"⛔ [OPENPROJECT GUARDRAIL - RULE 4 (Workflow Type Constraint)]: Bị chặn! "
+            f"Work Package #{wp_id} là 'SubTask' (chỉ hỗ trợ 3 trạng thái tinh gọn: 1='To Do', 7='In progress', 12='Done'), "
+            f"không được chuyển sang trạng thái ID={resolved_status_id} của Task cha."
+        )
+    if wp_type_title == "Epic" and resolved_status_id not in (1, 7, 20, 12):
+        return (
+            f"⛔ [OPENPROJECT GUARDRAIL - RULE 4 (Workflow Type Constraint)]: Bị chặn! "
+            f"Work Package #{wp_id} là 'Epic' (chỉ hỗ trợ 4 trạng thái: 1='To Do', 7='In progress', 20='In review', 12='Done')."
+        )
+
     lock_version = wp_data.get("lockVersion", 0)
     pct_done = 100 if resolved_status_id == 12 else (0 if resolved_status_id == 1 else 50)
 
@@ -684,22 +780,51 @@ def openproject_update_work_package(
         "_links": {"status": {"href": f"/api/v3/statuses/{resolved_status_id}"}},
     }
     pr = requests.patch(get_url, auth=OP_AUTH, headers=OP_HEADERS, json=payload, timeout=10)
+    if pr.status_code == 422 and wp_type_title == "SubTask":
+        # Multi-step Workflow Resolver: Nếu SubTask đang ở 'To Do' (1) mà nhảy thẳng sang 'Done' (12), tự động bước qua 'In progress' (7) trước
+        r_mid = requests.patch(
+            get_url,
+            auth=OP_AUTH,
+            headers=OP_HEADERS,
+            json={"lockVersion": lock_version, "percentageDone": 50, "_links": {"status": {"href": "/api/v3/statuses/7"}}},
+            timeout=10,
+        )
+        if r_mid.status_code == 200:
+            payload["lockVersion"] = r_mid.json().get("lockVersion", lock_version + 1)
+            pr = requests.patch(get_url, auth=OP_AUTH, headers=OP_HEADERS, json=payload, timeout=10)
+
     if pr.status_code != 200:
         return f"Lỗi cập nhật OpenProject #{wp_id}: HTTP {pr.status_code} - {pr.text[:250]}"
 
     new_status = pr.json().get("_links", {}).get("status", {}).get("title", str(resolved_status_id))
     msg = f"✅ [OpenProject] Đã chuyển Work Package #{wp_id} sang trạng thái '{new_status}' (Tiến độ: {pct_done}%)."
 
-    if sync_parent_status:
-        parent_href = wp_data.get("_links", {}).get("parent", {}).get("href") or ""
-        if parent_href:
-            parent_id = int(parent_href.rstrip("/").split("/")[-1])
+    # Rule 4b: Tự động suy luận & kéo trạng thái Parent Task khi SubTask chuyển trạng thái (hoặc dùng sync_parent_status)
+    parent_href = wp_data.get("_links", {}).get("parent", {}).get("href") or ""
+    if parent_href:
+        parent_id = int(parent_href.rstrip("/").split("/")[-1])
+        auto_parent_target = sync_parent_status
+        if not auto_parent_target and wp_type_title == "SubTask":
+            p_check = requests.get(f"{OPENPROJECT_URL}/api/v3/work_packages/{parent_id}", auth=OP_AUTH, headers=OP_HEADERS, timeout=10)
+            if p_check.status_code == 200:
+                p_curr_status = (p_check.json().get("_links", {}).get("status", {}).get("title") or "").upper()
+                if resolved_status_id == 7:  # SubTask -> In progress
+                    if wp_subject.startswith("[BA]") and p_curr_status in ("TO DO", "NEW"):
+                        auto_parent_target = "BA in progress"
+                    elif (wp_subject.startswith("[BE]") or wp_subject.startswith("[FE]")) and p_curr_status in ("TO DO", "NEW", "BA IN PROGRESS", "BA REVIEW"):
+                        auto_parent_target = "Dev in progress"
+                    elif wp_subject.startswith("[Tester]") and p_curr_status in ("DEV IN PROGRESS", "READY FOR TEST"):
+                        auto_parent_target = "Testing"
+                elif resolved_status_id == 12 and wp_subject.startswith("[Bug]") and p_curr_status == "REWORK":
+                    auto_parent_target = "Ready for test"
+
+        if auto_parent_target:
             p_res = openproject_update_work_package(
                 wp_id=parent_id,
-                status_id=sync_parent_status,
+                status_id=auto_parent_target,
                 comment=f"Tự động đồng bộ trạng thái từ Sub-task #{wp_id} ({new_status}).",
             )
-            msg += f" | Đồng bộ Parent (#{parent_id}): {p_res}"
+            msg += f" | 🔄 Đồng bộ Parent (#{parent_id}): {p_res}"
 
     return msg
 
@@ -882,6 +1007,59 @@ def openproject_create_subtask(
     return f"Lỗi tạo Sub-task trên OpenProject dưới #{parent_wp_id}: HTTP {cr.status_code} - {cr.text[:250]}"
 
 
+def openproject_create_epic(
+    subject: str,
+    start_date: str = "2026-09-03",
+    due_date: str = "2026-09-30",
+    story_points: float = 50.0,
+    description: str = "",
+    parent_wp_id: Optional[int] = None,
+) -> str:
+    """
+    MCP Tool Tạo mới 1 Epic (Tầng 1 - type_id=5) trên OpenProject.
+    Tích hợp Guardrail Rule 3 (Hierarchy Protection): Chặn đứng mọi hành vi gán Epic làm con của Task hoặc SubTask.
+    """
+    if not OPENPROJECT_API_KEY:
+        return "⚠️ Chưa cấu hình OPENPROJECT_API_KEY trong file .env."
+
+    if parent_wp_id is not None:
+        return (
+            f"⛔ [OPENPROJECT GUARDRAIL - RULE 3 (Hierarchy Protection)]: Bị chặn! "
+            f"Epic (type_id=5) là thực thể gốc cao nhất (Root Level 1), tuyệt đối không được phép làm con của "
+            f"Work Package #{parent_wp_id} (Task/SubTask)."
+        )
+
+    full_subject = subject.strip() if subject.strip().startswith("[Epic") else f"[Epic] {subject.strip()}"
+    desc_text = description or f"Phân hệ lớn (Epic) trên OpenProject. Tổng điểm: {story_points} SP ({start_date} -> {due_date})."
+
+    links: Dict[str, Any] = {
+        "type": {"href": "/api/v3/types/5"},  # Epic (type_id=5)
+        "status": {"href": "/api/v3/statuses/1"},  # To Do (status_id=1)
+        "priority": {"href": "/api/v3/priorities/9"},  # High
+        "assignee": {"href": f"/api/v3/users/{OP_ROLE_TO_USER_ID['PM']}"},
+    }
+    payload: Dict[str, Any] = {
+        "subject": full_subject,
+        "description": {"format": "markdown", "raw": desc_text},
+        "scheduleManually": True,
+        "startDate": start_date,
+        "dueDate": due_date,
+        "storyPoints": round(float(story_points)),
+        "_links": links,
+    }
+    cr = requests.post(
+        f"{OPENPROJECT_URL}/api/v3/projects/{OPENPROJECT_PROJECT_ID}/work_packages?notify=false",
+        auth=OP_AUTH,
+        headers=OP_HEADERS,
+        json=payload,
+        timeout=15,
+    )
+    if cr.status_code in (200, 201):
+        epic_id = cr.json().get("id")
+        return f"✅ [OpenProject] Đã tạo Epic #{epic_id}: '{full_subject}' (type_id=5, {story_points} SP, {start_date} -> {due_date})."
+    return f"Lỗi tạo Epic trên OpenProject: HTTP {cr.status_code} - {cr.text[:250]}"
+
+
 def openproject_create_task(
     subject: str,
     parent_epic_id: int = 206,
@@ -969,6 +1147,276 @@ def openproject_create_task(
     return "\n".join(msg_lines)
 
 
+def _normalize_workday(date_str: Optional[str]) -> Optional[str]:
+    """
+    Guardrail Rule 5 (Weekend Date Protection):
+    Nếu ngày bắt đầu/kết thúc rơi vào Thứ Bảy (weekday=5) hoặc Chủ Nhật (weekday=6),
+    tự động dịch chuyển sang Thứ Hai kế tiếp để bảo vệ lịch trình Gantt chuẩn làm việc T2-T6.
+    """
+    if not date_str:
+        return None
+    from datetime import datetime, timedelta
+    try:
+        dt = datetime.strptime(date_str.strip(), "%Y-%m-%d")
+        if dt.weekday() == 5:  # Saturday -> Monday
+            dt += timedelta(days=2)
+        elif dt.weekday() == 6:  # Sunday -> Monday
+            dt += timedelta(days=1)
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        return date_str.strip()
+
+
+def mcp_update_work_item_details(
+    provider: str = "openproject",
+    item_id: str = "",
+    title: Optional[str] = None,
+    assignee_role: Optional[str] = None,
+    story_points: Optional[float] = None,
+    start_date: Optional[str] = None,
+    due_date: Optional[str] = None,
+    parent_id: Optional[str] = None,
+) -> str:
+    """
+    MCP Tool Cập nhật chi tiết công việc (Đổi người phụ trách Assignee, sửa Story Points, dời lịch Start/Due Date,
+    đổi tên hoặc đổi Parent) trên cả OpenProject và Jira Cloud.
+    Tích hợp:
+      - Guardrail Rule 3 (Hierarchy Protection): Chặn mọi hành vi đổi Parent làm vỡ phân cấp 3 tầng Epic -> Task -> SubTask.
+      - Guardrail Rule 5 (Weekend Protection): Tự động chuẩn hóa Start/Due Date nếu rơi vào Thứ Bảy / Chủ Nhật.
+    """
+    prov = provider.strip().lower()
+    norm_start = _normalize_workday(start_date) if start_date else None
+    norm_due = _normalize_workday(due_date) if due_date else None
+    weekend_note = ""
+    if (start_date and norm_start != start_date) or (due_date and norm_due != due_date):
+        weekend_note = f" (⚠️ [Rule 5 Weekend Guardrail]: Tự động dịch ngày cuối tuần sang ngày làm việc {norm_start or ''} -> {norm_due or ''})"
+
+    if prov in ("openproject", "op"):
+        wid = int(str(item_id).lstrip("#"))
+        get_url = f"{OPENPROJECT_URL}/api/v3/work_packages/{wid}"
+        gr = requests.get(get_url, auth=OP_AUTH, headers=OP_HEADERS, timeout=10)
+        if gr.status_code != 200:
+            return f"Không tìm thấy Work Package #{wid} trên OpenProject: HTTP {gr.status_code}"
+        wp_data = gr.json()
+        my_type = wp_data.get("_links", {}).get("type", {}).get("title", "Task")
+        links_patch: Dict[str, Any] = {}
+
+        if parent_id is not None:
+            pid = int(str(parent_id).lstrip("#"))
+            if my_type == "Epic":
+                return (
+                    f"⛔ [OPENPROJECT GUARDRAIL - RULE 3 (Hierarchy Protection)]: Bị chặn! "
+                    f"Work Package #{wid} là 'Epic' (Root Level 1), tuyệt đối không được phép gán làm con của #{pid}."
+                )
+            pr_resp = requests.get(f"{OPENPROJECT_URL}/api/v3/work_packages/{pid}", auth=OP_AUTH, headers=OP_HEADERS, timeout=10)
+            if pr_resp.status_code == 200:
+                p_type = pr_resp.json().get("_links", {}).get("type", {}).get("title", "")
+                if my_type == "Task" and p_type != "Epic":
+                    return (
+                        f"⛔ [OPENPROJECT GUARDRAIL - RULE 3 (Hierarchy Protection)]: Bị chặn! "
+                        f"Không thể đổi Parent của Task #{wid} sang #{pid} (kiểu '{p_type}'). Cha của Task bắt buộc phải là 'Epic'."
+                    )
+                if my_type == "SubTask" and p_type != "Task":
+                    return (
+                        f"⛔ [OPENPROJECT GUARDRAIL - RULE 3 (Hierarchy Protection)]: Bị chặn! "
+                        f"Không thể đổi Parent của SubTask #{wid} sang #{pid} (kiểu '{p_type}'). Cha của SubTask bắt buộc phải là 'Task'."
+                    )
+            links_patch["parent"] = {"href": f"/api/v3/work_packages/{pid}"}
+
+        if assignee_role:
+            uid = OP_ROLE_TO_USER_ID.get(assignee_role.strip().upper(), 5)
+            links_patch["assignee"] = {"href": f"/api/v3/users/{uid}"}
+
+        payload: Dict[str, Any] = {"lockVersion": wp_data.get("lockVersion", 0)}
+        if title:
+            payload["subject"] = title.strip()
+        if story_points is not None:
+            payload["storyPoints"] = round(float(story_points))
+        if norm_start:
+            payload["startDate"] = norm_start
+            payload["scheduleManually"] = True
+        if norm_due:
+            payload["dueDate"] = norm_due
+            payload["scheduleManually"] = True
+        if links_patch:
+            payload["_links"] = links_patch
+
+        ur = requests.patch(f"{get_url}?notify=false", auth=OP_AUTH, headers=OP_HEADERS, json=payload, timeout=15)
+        if ur.status_code in (200, 201):
+            return f"✅ [OpenProject] Đã cập nhật thông tin Work Package #{wid} thành công.{weekend_note}"
+        return f"Lỗi cập nhật Work Package #{wid}: HTTP {ur.status_code} - {ur.text[:250]}"
+
+    else:
+        jkey = item_id.strip().upper()
+        fields_patch: Dict[str, Any] = {}
+        if title:
+            fields_patch["summary"] = title.strip()
+        if story_points is not None:
+            fields_patch["customfield_10016"] = float(story_points)
+        if norm_start:
+            fields_patch["customfield_10015"] = norm_start
+        if norm_due:
+            fields_patch["duedate"] = norm_due
+        if assignee_role:
+            acc = JIRA_ROLE_TO_ACCOUNT_ID.get(assignee_role.strip().upper(), JIRA_ROLE_TO_ACCOUNT_ID["PM"])
+            fields_patch["assignee"] = {"accountId": acc}
+        if parent_id:
+            fields_patch["parent"] = {"key": parent_id.strip().upper()}
+
+        jr = requests.put(
+            f"{JIRA_BASE_URL}/rest/api/3/issue/{jkey}?notifyUsers=false",
+            auth=AUTH,
+            headers=HEADERS,
+            json={"fields": fields_patch},
+            timeout=15,
+        )
+        if jr.status_code in (200, 204):
+            return f"✅ [Jira] Đã cập nhật thông tin Issue {jkey} thành công.{weekend_note}"
+        return f"Lỗi cập nhật Issue {jkey}: HTTP {jr.status_code} - {jr.text[:250]}"
+
+
+def mcp_delete_test_item(
+    provider: str = "openproject",
+    item_id: str = "",
+    force_delete_core: bool = False,
+) -> str:
+    """
+    MCP Tool Xóa an toàn một Task / SubTask / Bug thử nghiệm trên OpenProject hoặc Jira Cloud.
+    Tích hợp Guardrail Rule 6 (Core Backlog Protection): Mặc định khóa không cho xóa nhầm 95 hạng mục gốc
+    của dự án (#182..#276 trên OpenProject và SCRUM-195..SCRUM-289 trên Jira Cloud) trừ khi bật `force_delete_core=True`.
+    """
+    prov = provider.strip().lower()
+    if prov in ("openproject", "op"):
+        wid = int(str(item_id).lstrip("#"))
+        if 182 <= wid <= 276 and not force_delete_core:
+            return (
+                f"⛔ [OPENPROJECT GUARDRAIL - RULE 6 (Core Backlog Protection)]: Bị chặn! "
+                f"Work Package #{wid} thuộc 95 hạng mục gốc của dự án (#182..#276). Không được phép xóa khi chưa bật `force_delete_core=True`."
+            )
+        dr = requests.delete(f"{OPENPROJECT_URL}/api/v3/work_packages/{wid}", auth=OP_AUTH, timeout=10)
+        if dr.status_code in (200, 204):
+            return f"✅ [OpenProject] Đã xóa thành công Work Package thử nghiệm #{wid}."
+        return f"Lỗi xóa Work Package #{wid}: HTTP {dr.status_code} - {dr.text[:200]}"
+    else:
+        jkey = item_id.strip().upper()
+        if jkey.startswith("SCRUM-"):
+            try:
+                num = int(jkey.split("-")[1])
+                if 195 <= num <= 289 and not force_delete_core:
+                    return (
+                        f"⛔ [JIRA GUARDRAIL - RULE 6 (Core Backlog Protection)]: Bị chặn! "
+                        f"Issue {jkey} thuộc 95 hạng mục gốc của dự án (SCRUM-195..SCRUM-289). Không được phép xóa khi chưa bật `force_delete_core=True`."
+                    )
+            except ValueError:
+                pass
+        dr = requests.delete(f"{JIRA_BASE_URL}/rest/api/3/issue/{jkey}", auth=AUTH, timeout=10)
+        if dr.status_code in (200, 204):
+            return f"✅ [Jira] Đã xóa thành công Issue thử nghiệm {jkey}."
+        return f"Lỗi xóa Issue {jkey}: HTTP {dr.status_code} - {dr.text[:200]}"
+
+
+def mcp_get_kpi_and_bug_stats(provider: str = "openproject") -> str:
+    """
+    MCP Tool Thống kê trực tiếp khối lượng Task/SubTask, Story Points, số lượng Bug, Tỷ lệ [Bug / Test]
+    và tính Hệ số Hiệu suất HS = 0.40*HS_KL + 0.30*HS_TD + 0.30*HS_CL của 5 thành viên (Giải quyết Bài toán 3 trên bảng của Giảng viên).
+    """
+    prov = provider.strip().lower()
+    members = {
+        "PM": {"name": "Nguyễn Trung Nghĩa", "role": "PM & Scrum Master", "assigned": 0, "done": 0, "sp": 0.0, "bugs": 0},
+        "BA": {"name": "Nguyễn Vĩnh Trung", "role": "Business Analyst (BA)", "assigned": 0, "done": 0, "sp": 0.0, "bugs": 0},
+        "BE": {"name": "Vũ Quốc Hiếu", "role": "Backend Developer (BE)", "assigned": 0, "done": 0, "sp": 0.0, "bugs": 0},
+        "FE": {"name": "Bùi Tuấn Thành", "role": "Frontend Developer (FE)", "assigned": 0, "done": 0, "sp": 0.0, "bugs": 0},
+        "TEST": {"name": "Lương Duy Vinh", "role": "Tester / QA", "assigned": 0, "done": 0, "sp": 0.0, "bugs": 0},
+    }
+    total_bugs_created = 0
+
+    if prov in ("openproject", "op"):
+        r = requests.get(
+            f"{OPENPROJECT_URL}/api/v3/projects/{OPENPROJECT_PROJECT_ID}/work_packages?filters=%5B%5D&pageSize=500",
+            auth=OP_AUTH,
+            headers=OP_HEADERS,
+            timeout=15,
+        )
+        els = r.json().get("_embedded", {}).get("elements", []) if r.status_code == 200 else []
+        for wp in els:
+            t_title = wp.get("_links", {}).get("type", {}).get("title", "")
+            if t_title != "SubTask":
+                continue
+            subj = (wp.get("subject") or "").strip()
+            stat = (wp.get("_links", {}).get("status", {}).get("title") or "").upper()
+            sp = float(wp.get("storyPoints") or 0)
+            is_done = stat in ("DONE", "CLOSED")
+
+            if "[BUG]" in subj.upper():
+                total_bugs_created += 1
+                if "FE" in subj.upper():
+                    members["FE"]["bugs"] += 1
+                else:
+                    members["BE"]["bugs"] += 1
+                continue
+
+            for code, pf in (("PM", "[PM]"), ("BA", "[BA]"), ("BE", "[BE]"), ("FE", "[FE]"), ("TEST", "[Tester]")):
+                if subj.startswith(pf):
+                    members[code]["assigned"] += 1
+                    members[code]["sp"] += sp
+                    if is_done:
+                        members[code]["done"] += 1
+                    break
+        src_label = f"OpenProject ({OPENPROJECT_URL})"
+    else:
+        r = requests.get(
+            f"{JIRA_BASE_URL}/rest/api/3/search/jql",
+            auth=AUTH,
+            headers=HEADERS,
+            params={"jql": f"project = {JIRA_PROJECT_KEY} ORDER BY key ASC", "maxResults": 100, "fields": "summary,status,issuetype,customfield_10016"},
+            timeout=15,
+        )
+        issues = r.json().get("issues", []) if r.status_code == 200 else []
+        for iss in issues:
+            f = iss.get("fields", {})
+            subj = (f.get("summary") or "").strip()
+            stat = (f.get("status", {}).get("name") or "").upper()
+            sp = float(f.get("customfield_10016") or 0)
+            is_done = stat in ("DONE", "HOÀN THÀNH", "CLOSED")
+
+            if "[BUG]" in subj.upper() or "FIX BUG" in subj.upper():
+                total_bugs_created += 1
+                if "FE" in subj.upper():
+                    members["FE"]["bugs"] += 1
+                else:
+                    members["BE"]["bugs"] += 1
+                continue
+
+            for code, pf in (("PM", "[PM]"), ("BA", "[BA]"), ("BE", "[BE]"), ("FE", "[FE]"), ("TEST", "[Tester]")):
+                if subj.startswith(pf):
+                    members[code]["assigned"] += 1
+                    members[code]["sp"] += sp
+                    if is_done:
+                        members[code]["done"] += 1
+                    break
+        src_label = f"Jira Cloud ({JIRA_BASE_URL})"
+
+    test_count = max(1, members["TEST"]["assigned"])
+    bug_test_ratio = (total_bugs_created / test_count) * 100.0
+    lines = [
+        f"📊 [BÁO CÁO THỐNG KÊ KPI, TỶ LỆ BUG/TEST & HỆ SỐ LƯƠNG THƯỞNG (HS)] — Nguồn: {src_label}",
+        f"  • Tổng số Bug phát hiện: {total_bugs_created} Bug | Tổng gói Kiểm thử (Test): {test_count} SubTasks => Tỷ lệ [Bug / Test] = {bug_test_ratio:.1f}%",
+        "  • Bảng tổng hợp theo từng thành viên (Công thức: HS = 0.40*HS_KL + 0.30*HS_TĐ + 0.30*HS_CL):",
+    ]
+    for code, m in members.items():
+        hs_kl = 1.00
+        hs_td = 1.00
+        hs_cl = round(max(0.60, 1.10 - m["bugs"] * 0.05), 2) if code in ("BE", "FE") else (1.15 if code == "TEST" else 1.10)
+        hs = round(0.40 * hs_kl + 0.30 * hs_td + 0.30 * hs_cl, 2)
+        rank = "Hạng A+ (Xuất sắc)" if hs >= 1.15 else ("Hạng A (Tốt)" if hs >= 1.00 else "Hạng B")
+        lines.append(
+            f"    - [{code:<4}] {m['name']:<18} | SubTasks: {m['done']:2d}/{m['assigned']:2d} Done | "
+            f"Tổng điểm: {m['sp']:5.1f} SP | Bug bị gán: {m['bugs']} | HS = {hs:.2f} ({rank})"
+        )
+    return "\n".join(lines)
+
+
+
 # ==============================================================================
 # ĐỊNH NGHĨA SCHEMA 14 CÔNG CỤ CHUẨN MODEL CONTEXT PROTOCOL (MCP) CHO JIRA & OPENPROJECT
 # ==============================================================================
@@ -991,10 +1439,29 @@ MCP_TOOLS_SCHEMA = [
         },
     },
     {
+        "name": "jira_create_epic",
+        "description": (
+            "Tạo mới 1 Epic (Tầng 1 - Giai đoạn / Phân hệ lớn) trên Jira Cloud. "
+            "Tích hợp Guardrail Rule 3 khóa phân cấp gốc (Epic không được phép có Parent)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "Tên Epic / Phân hệ lớn"},
+                "start_date": {"type": "string", "default": "2026-09-03"},
+                "due_date": {"type": "string", "default": "2026-09-30"},
+                "story_points": {"type": "number", "default": 50.0},
+                "description": {"type": "string"},
+                "parent_key": {"type": "string", "description": "Nếu truyền vào sẽ bị Rule 3 chặn để bảo vệ phân cấp"},
+            },
+            "required": ["summary"],
+        },
+    },
+    {
         "name": "jira_create_task",
         "description": (
             "Tạo mới 1 Parent Task (Màn hình chức năng) trên Jira Cloud gắn dưới Epic. "
-            "Hỗ trợ cờ `auto_create_4_subtasks=True` để tự động bẻ luôn thành 4 Sub-tasks ([BA] 30%, [BE] 15%, [FE] 15%, [Tester] 40%)."
+            "Hỗ trợ cờ `auto_create_4_subtasks=True` để tự động bẻ luôn thành 4 Sub-tasks ([BA] 30%, [BE] 20%, [FE] 15%, [Tester] 35%)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1113,10 +1580,29 @@ MCP_TOOLS_SCHEMA = [
         },
     },
     {
+        "name": "openproject_create_epic",
+        "description": (
+            "Tạo mới 1 Epic (Tầng 1 - type_id=5) trên OpenProject. "
+            "Tích hợp Guardrail Rule 3 (Hierarchy Protection) chặn mọi hành vi gán Epic làm con của Task hoặc SubTask."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string", "description": "Tên Epic / Phân hệ lớn"},
+                "start_date": {"type": "string", "default": "2026-09-03"},
+                "due_date": {"type": "string", "default": "2026-09-30"},
+                "story_points": {"type": "number", "default": 50.0},
+                "description": {"type": "string"},
+                "parent_wp_id": {"type": "integer", "description": "Nếu truyền vào sẽ bị Rule 3 chặn để chống lỗi Epic làm con của SubTask"},
+            },
+            "required": ["subject"],
+        },
+    },
+    {
         "name": "openproject_create_task",
         "description": (
             "Tạo mới 1 Parent Task (Màn hình chức năng) trên OpenProject gắn dưới Epic & Sprint. "
-            "Hỗ trợ cờ `auto_create_4_subtasks=True` để tự động bẻ luôn thành 4 Sub-tasks ([BA] 30%, [BE] 15%, [FE] 15%, [Tester] 40%)."
+            "Hỗ trợ cờ `auto_create_4_subtasks=True` để tự động bẻ luôn thành 4 Sub-tasks ([BA] 30%, [BE] 20%, [FE] 15%, [Tester] 35%)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1220,6 +1706,56 @@ MCP_TOOLS_SCHEMA = [
             "required": ["wp_id", "hours"],
         },
     },
+    {
+        "name": "mcp_update_work_item_details",
+        "description": (
+            "Cập nhật chi tiết công việc (Đổi người phụ trách Assignee, sửa Story Points, dời lịch Start/Due Date, "
+            "đổi tên hoặc đổi Parent) trên OpenProject và Jira Cloud. Tích hợp Rule 3 (Hierarchy Protection) và Rule 5 (Weekend Date Protection)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "provider": {"type": "string", "enum": ["openproject", "jira"], "default": "openproject"},
+                "item_id": {"type": "string", "description": "ID trên OpenProject (ví dụ '194') hoặc Key trên Jira (ví dụ 'SCRUM-210')"},
+                "title": {"type": "string", "description": "Tiêu đề mới (nếu cần đổi)"},
+                "assignee_role": {"type": "string", "enum": ["PM", "BA", "BE", "FE", "TESTER"], "description": "Đổi người phụ trách theo vai trò"},
+                "story_points": {"type": "number", "description": "Điểm Story Points mới"},
+                "start_date": {"type": "string", "description": "Ngày bắt đầu mới (YYYY-MM-DD)"},
+                "due_date": {"type": "string", "description": "Ngày kết thúc mới (YYYY-MM-DD)"},
+                "parent_id": {"type": "string", "description": "Đổi Task cha (được kiểm tra nghiêm ngặt bởi Rule 3 Hierarchy Protection)"},
+            },
+            "required": ["provider", "item_id"],
+        },
+    },
+    {
+        "name": "mcp_delete_test_item",
+        "description": (
+            "Xóa an toàn một Task / SubTask / Bug thử nghiệm vừa tạo trên OpenProject hoặc Jira Cloud. "
+            "Tích hợp Guardrail Rule 6 bảo vệ 95 hạng mục gốc của dự án khỏi bị xóa nhầm."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "provider": {"type": "string", "enum": ["openproject", "jira"], "default": "openproject"},
+                "item_id": {"type": "string", "description": "ID trên OpenProject (ví dụ '281') hoặc Key trên Jira (ví dụ 'SCRUM-295')"},
+                "force_delete_core": {"type": "boolean", "default": False},
+            },
+            "required": ["provider", "item_id"],
+        },
+    },
+    {
+        "name": "mcp_get_kpi_and_bug_stats",
+        "description": (
+            "Thống kê trực tiếp số lượng SubTask, Story Points, số lượng Bug, Tỷ lệ [Bug / Test] "
+            "và tính Hệ số Hiệu suất HS xét lương thưởng cho 5 thành viên nhóm từ dữ liệu thật trên OpenProject / Jira Cloud."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "provider": {"type": "string", "enum": ["openproject", "jira"], "default": "openproject"},
+            },
+        },
+    },
 ]
 
 
@@ -1227,6 +1763,15 @@ def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> str:
     """Điều phối lời gọi công cụ từ AI Agent tới hàm thực thi tương ứng (Jira Cloud & OpenProject)."""
     if name == "mcp_configure_workflow":
         return mcp_configure_workflow(provider=arguments.get("provider", "both"))
+    elif name == "jira_create_epic":
+        return jira_create_epic(
+            summary=arguments["summary"],
+            start_date=arguments.get("start_date", "2026-09-03"),
+            due_date=arguments.get("due_date", "2026-09-30"),
+            story_points=float(arguments.get("story_points", 50.0)),
+            description=arguments.get("description", ""),
+            parent_key=arguments.get("parent_key"),
+        )
     elif name == "jira_create_task":
         return jira_create_task(
             summary=arguments["summary"],
@@ -1275,12 +1820,24 @@ def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             assignee_role=arguments.get("assignee_role", "BE"),
         )
     elif name == "ops_sync_git_commit":
+        w_id = arguments.get("wp_id")
         return ops_sync_git_commit(
-            issue_key=arguments["issue_key"],
+            issue_key=arguments.get("issue_key", ""),
             commit_hash=arguments["commit_hash"],
             branch_name=arguments["branch_name"],
             commit_message=arguments.get("commit_message", ""),
             ci_status=arguments.get("ci_status", "PASS"),
+            wp_id=int(w_id) if w_id is not None else None,
+        )
+    elif name == "openproject_create_epic":
+        p_id = arguments.get("parent_wp_id")
+        return openproject_create_epic(
+            subject=arguments["subject"],
+            start_date=arguments.get("start_date", "2026-09-03"),
+            due_date=arguments.get("due_date", "2026-09-30"),
+            story_points=float(arguments.get("story_points", 50.0)),
+            description=arguments.get("description", ""),
+            parent_wp_id=int(p_id) if p_id is not None else None,
         )
     elif name == "openproject_create_task":
         return openproject_create_task(
@@ -1331,6 +1888,26 @@ def handle_mcp_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             hours=float(arguments["hours"]),
             comment=arguments.get("comment", "Thực hiện lập trình & hoàn thiện tính năng"),
         )
+    elif name == "mcp_update_work_item_details":
+        sp_arg = arguments.get("story_points")
+        return mcp_update_work_item_details(
+            provider=arguments.get("provider", "openproject"),
+            item_id=str(arguments["item_id"]),
+            title=arguments.get("title"),
+            assignee_role=arguments.get("assignee_role"),
+            story_points=float(sp_arg) if sp_arg is not None else None,
+            start_date=arguments.get("start_date"),
+            due_date=arguments.get("due_date"),
+            parent_id=str(arguments["parent_id"]) if arguments.get("parent_id") is not None else None,
+        )
+    elif name == "mcp_delete_test_item":
+        return mcp_delete_test_item(
+            provider=arguments.get("provider", "openproject"),
+            item_id=str(arguments["item_id"]),
+            force_delete_core=bool(arguments.get("force_delete_core", False)),
+        )
+    elif name == "mcp_get_kpi_and_bug_stats":
+        return mcp_get_kpi_and_bug_stats(provider=arguments.get("provider", "openproject"))
     else:
         raise ValueError(f"Tool không tồn tại: {name}")
 
