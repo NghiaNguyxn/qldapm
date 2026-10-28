@@ -89,14 +89,18 @@ def _build_wp_payload(
         payload["scheduleManually"] = bool(args["schedule_manually"])
 
     # Effort & Progress
-    if "estimated_hours" in args and args["estimated_hours"] is not None:
-        payload["estimatedTime"] = hours_to_iso_duration(args["estimated_hours"])
-    if "remaining_hours" in args and args["remaining_hours"] is not None:
-        payload["remainingTime"] = hours_to_iso_duration(args["remaining_hours"])
+    if "estimated_hours" in args:
+        payload["estimatedTime"] = (
+            hours_to_iso_duration(args["estimated_hours"]) if args["estimated_hours"] is not None else None
+        )
+    if "remaining_hours" in args:
+        payload["remainingTime"] = (
+            hours_to_iso_duration(args["remaining_hours"]) if args["remaining_hours"] is not None else None
+        )
     if "percentage_done" in args and args["percentage_done"] is not None:
         payload["percentageDone"] = int(args["percentage_done"])
-    if "story_points" in args and args["story_points"] is not None:
-        payload["storyPoints"] = int(args["story_points"])
+    if "story_points" in args:
+        payload["storyPoints"] = int(args["story_points"]) if args["story_points"] is not None else None
 
     if "lock_version" in args and args["lock_version"] is not None:
         payload["lockVersion"] = int(args["lock_version"])
@@ -162,6 +166,10 @@ def register_tools(registry: ToolRegistry) -> None:
             "start_date_to": {"type": "string", "description": "Start date range upper bound (YYYY-MM-DD)."},
             "due_date_from": {"type": "string", "description": "Due date range lower bound (YYYY-MM-DD)."},
             "due_date_to": {"type": "string", "description": "Due date range upper bound (YYYY-MM-DD)."},
+            "active_on_date": {
+                "type": "string",
+                "description": "Filter tasks active on a specific date ('today' or 'YYYY-MM-DD' where startDate <= date <= dueDate).",
+            },
             "updated_since": {"type": "string", "description": "ISO timestamp or date (YYYY-MM-DD) for recently updated items."},
             "raw_filters": {
                 "type": "array",
@@ -224,6 +232,7 @@ def register_tools(registry: ToolRegistry) -> None:
             start_date_to=args.get("start_date_to"),
             due_date_from=args.get("due_date_from"),
             due_date_to=args.get("due_date_to"),
+            active_on_date=args.get("active_on_date"),
             updated_since=args.get("updated_since"),
         )
 
@@ -245,6 +254,7 @@ def register_tools(registry: ToolRegistry) -> None:
                 wp,
                 sanitize=client.config.sanitize_untrusted_content,
                 include_description=inc_desc,
+                compact=True,
             )
             for wp in elements
         ]

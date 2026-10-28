@@ -158,6 +158,7 @@ def normalize_work_package(
     sanitize: bool = True,
     include_description: bool = True,
     include_custom_fields: bool = True,
+    compact: bool = False,
 ) -> Dict[str, Any]:
     """Convert a verbose HAL+JSON WorkPackage into a clean, context-frugal dictionary."""
     if not isinstance(wp, dict):
@@ -174,7 +175,7 @@ def normalize_work_package(
     result: Dict[str, Any] = {
         "id": wp.get("id"),
         "subject": wp.get("subject"),
-        "lockVersion": wp.get("lockVersion"),
+        "lockVersion": None if compact else wp.get("lockVersion"),
         "project": {
             "id": extract_link_id(links, "project"),
             "name": extract_link_title(links, "project"),
@@ -199,10 +200,10 @@ def normalize_work_package(
             "id": extract_link_id(links, "responsible"),
             "name": extract_link_title(links, "responsible"),
         } if extract_link_id(links, "responsible") else None,
-        "author": {
+        "author": None if compact else ({
             "id": extract_link_id(links, "author"),
             "name": extract_link_title(links, "author"),
-        } if extract_link_id(links, "author") else None,
+        } if extract_link_id(links, "author") else None),
         "parent": {
             "id": extract_link_id(links, "parent"),
             "subject": extract_link_title(links, "parent"),
@@ -219,7 +220,7 @@ def normalize_work_package(
         "dueDate": wp.get("dueDate") or wp.get("date"),
         "derivedStartDate": wp.get("derivedStartDate"),
         "derivedDueDate": wp.get("derivedDueDate"),
-        "scheduleManually": wp.get("scheduleManually"),
+        "scheduleManually": None if compact else wp.get("scheduleManually"),
         "percentageDone": wp.get("percentageDone"),
         "derivedPercentageDone": wp.get("derivedPercentageDone"),
         "estimatedHours": iso_duration_to_hours(est_iso),
@@ -227,18 +228,21 @@ def normalize_work_package(
         "remainingHours": iso_duration_to_hours(rem_iso),
         "spentHours": iso_duration_to_hours(spent_iso),
         "storyPoints": wp.get("storyPoints"),
-        "createdAt": wp.get("createdAt"),
-        "updatedAt": wp.get("updatedAt"),
+        "createdAt": None if compact else wp.get("createdAt"),
+        "updatedAt": None if compact else wp.get("updatedAt"),
     }
 
     # Children count / links
     children_links = links.get("children")
     if isinstance(children_links, list):
-        result["children"] = [
-            {"id": extract_id_from_href(c.get("href")), "subject": c.get("title")}
-            for c in children_links
-            if isinstance(c, dict) and c.get("href")
-        ]
+        if compact:
+            result["childrenCount"] = len(children_links)
+        else:
+            result["children"] = [
+                {"id": extract_id_from_href(c.get("href")), "subject": c.get("title")}
+                for c in children_links
+                if isinstance(c, dict) and c.get("href")
+            ]
 
     if include_description and raw_desc:
         result["description"] = wrap_untrusted_text(raw_desc, sanitize=sanitize)
@@ -246,13 +250,13 @@ def normalize_work_package(
     if include_custom_fields:
         custom_fields: Dict[str, Any] = {}
         for k, v in wp.items():
-            if k.startswith("customField") and v is not None:
+            if k.startswith("customField") and k != "customFields" and v is not None:
                 if isinstance(v, dict) and "raw" in v:
                     custom_fields[k] = v.get("raw")
                 else:
                     custom_fields[k] = v
         for k, v in links.items():
-            if k.startswith("customField") and v is not None:
+            if k.startswith("customField") and k != "customFields" and v is not None:
                 if isinstance(v, dict) and v.get("href"):
                     custom_fields[k] = {
                         "id": extract_id_from_href(v.get("href")),
@@ -476,6 +480,7 @@ def build_openproject_filters(
     start_date_to: Optional[str] = None,
     due_date_from: Optional[str] = None,
     due_date_to: Optional[str] = None,
+    active_on_date: Optional[str] = None,
     updated_since: Optional[str] = None,
 ) -> Optional[str]:
     """
@@ -543,14 +548,30 @@ def build_openproject_filters(
     if search_text:
         filters.append({"subjectOrId": {"operator": "**", "values": [str(search_text)]}})
 
-    if start_date_from and start_date_to:
+    if active_on_date:
+        from datetime import date as _date
+        target_d = _date.today().isoformat() if str(active_on_date).lower() == "today" else str(active_on_date)
+        start_date_to = start_date_to or target_d
+        due_date_from = due_date_from or target_d
+
+    if start_date_from or start_date_to:
         filters.append(
-            {"startDate": {"operator": "<>d", "values": [start_date_from, start_date_to]}}
+            {
+                "startDate": {
+                    "operator": "<>d",
+                    "values": [start_date_from or "2000-01-01", start_date_to or "2099-12-31"],
+                }
+            }
         )
 
-    if due_date_from and due_date_to:
+    if due_date_from or due_date_to:
         filters.append(
-            {"dueDate": {"operator": "<>d", "values": [due_date_from, due_date_to]}}
+            {
+                "dueDate": {
+                    "operator": "<>d",
+                    "values": [due_date_from or "2000-01-01", due_date_to or "2099-12-31"],
+                }
+            }
         )
 
     if updated_since:
