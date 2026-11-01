@@ -90,19 +90,26 @@ PROMPT_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "op-bug-triage",
         "description": (
-            "Standardized Bug Triage workflow: inspect project types/statuses/members, check for duplicate "
-            "issues, create a structured Bug work package, link it to the affected task, and route to an assignee."
+            "Standardized 3-Tier Bug Triage workflow: check for duplicate issues, create a Tier 3 "
+            "'[Bug] ...' Sub-task (type_id=8, story_points=0) under the affected parent screen Task, "
+            "assign to BE (user_id=6) or FE (user_id=7), reopen the offending [BE]/[FE] Sub-task to 'In progress' (7), "
+            "and post a 3-part handoff comment on the parent Task requesting PM (user_id=4) to transition the parent Task to 'Rework' (14)."
         ),
         "arguments": [
             {
                 "name": "project_id",
-                "description": "OpenProject project ID.",
+                "description": "OpenProject project ID (default: 3).",
                 "required": True,
             },
             {
                 "name": "bug_summary",
                 "description": "Symptom or error description of the bug.",
                 "required": True,
+            },
+            {
+                "name": "parent_task_id",
+                "description": "Optional parent screen Task work package ID under which to create the [Bug] Sub-task.",
+                "required": False,
             },
         ],
     },
@@ -122,30 +129,30 @@ def get_prompt(name: str, arguments: Dict[str, Any] | None = None) -> Dict[str, 
         epic_id = args.get("epic_parent_id", "")
         start_d = args.get("start_date", "today")
         return {
-            "description": f"3-Tier WBS Architect (Epic -> Task -> 4 Sub-tasks [BA/BE/FE/Tester]) for project {proj_id}",
+            "description": f"3-Tier WBS Architect (Epic -> Task -> 4 Sub-tasks [BA/BE/FE/Tester] 30-20-15-35) for project {proj_id}",
             "messages": [
                 {
                     "role": "user",
                     "content": {
                         "type": "text",
                         "text": (
-                            f"Act as a Senior Project Manager connected to OpenProject (project_id={proj_id}).\n"
+                            f"Act as a Senior Project Manager (PM - Nguyễn Trung Nghĩa, user_id=4) connected to OpenProject (project_id={proj_id}).\n"
                             f"Screen/Module Requirement to decompose: {req}\n"
                             f"Parent Epic ID (if any): {epic_id or 'Inspect existing Epics first'}\n"
                             f"Target start date: {start_d}\n\n"
-                            "Follow the team's exact 3-Tier OpenProject WBS standard:\n"
-                            "- Tier 1: `Epic` (type_id='Epic' / 5)\n"
-                            "- Tier 2: `Task` (type_id='Task' / 1, e.g. `[Màn hình] ...`, child of the Epic)\n"
-                            "- Tier 3: `Sub-task` (type_id='Sub-task' / 8, child of the Task), split into 4 role-based Sub-tasks:\n"
-                            "   1. `[BA] Phân tích & Thiết kế ...` (Assigned to BA - Nguyễn Vĩnh Trung)\n"
-                            "   2. `[BE] Lập trình API ...` (Assigned to BE - Vũ Quốc Hiếu)\n"
-                            "   3. `[FE] Lập trình Giao diện ...` (Assigned to FE - Bùi Tuấn Thành)\n"
-                            "   4. `[Tester] Thiết kế Test Case, Kiểm thử ...` (Assigned to Tester - Lương Duy Vinh)\n\n"
+                            "Follow the team's exact 3-Tier OpenProject WBS & 30-20-15-35 Role Weight Ratio standard:\n"
+                            "- Tier 1: `Epic` (type_id='Epic' / 5, owned by PM user_id=4, no direct estimated_hours)\n"
+                            "- Tier 2: `Task` (type_id='Task' / 1, e.g. `[Màn hình] ...`, child of the Epic, owned by PM user_id=4, 10 SP, no direct estimated_hours)\n"
+                            "- Tier 3: `Sub-task` (type_id='Sub-task' / 8, child of the Task), split into 4 role-based Sub-tasks following the 30-20-15-35 ratio (total 10 SP = 40h):\n"
+                            "   1. `[BA] Phân tích & Thiết kế ...` — 30% = 3.0 SP, 12h (Assigned to BA - Nguyễn Vĩnh Trung, user_id=5)\n"
+                            "   2. `[BE] Lập trình API ...` — 20% = 2.0 SP, 8h (Assigned to BE - Vũ Quốc Hiếu, user_id=6)\n"
+                            "   3. `[FE] Lập trình Giao diện ...` — 15% = 1.5 SP, 6h (Assigned to FE - Bùi Tuấn Thành, user_id=7)\n"
+                            "   4. `[Tester] Thiết kế Test Case, Kiểm thử ...` — 35% = 3.5 SP, 14h (Assigned to Tester - Lương Duy Vinh, user_id=8)\n\n"
                             "Steps to execute:\n"
-                            "1. Call `op_get_project` and `op_list_project_assignable_users` to confirm type IDs and member user IDs.\n"
+                            "1. Call `op_get_role_context` and `op_get_project` to confirm PM role context and project IDs.\n"
                             "2. Call `op_bulk_create_work_packages` using symbolic `ref_key` (e.g. 'TASK-1') on the parent `Task` and `parent_ref='TASK-1'` on the 4 `Sub-task` items.\n"
                             "3. Call `op_create_dependency_chain` to link the 4 Sub-tasks in sequence ([BA] -> [BE] -> [FE] -> [Tester]).\n"
-                            "4. Present a summary table of created work package IDs, types (Epic / Task / Sub-task), assignees, dates, and estimated hours."
+                            "4. Present a summary table of created work package IDs, types (Epic / Task / Sub-task), assignees, dates, story points, and estimated hours."
                         ),
                     },
                 }
@@ -154,21 +161,23 @@ def get_prompt(name: str, arguments: Dict[str, Any] | None = None) -> Dict[str, 
 
     if name == "op-daily-standup":
         return {
-            "description": f"Daily Standup Report for project {proj_id}",
+            "description": f"Role-aware Daily Standup Report for project {proj_id}",
             "messages": [
                 {
                     "role": "user",
                     "content": {
                         "type": "text",
                         "text": (
-                            f"Generate a structured Daily Standup Report for OpenProject project `{proj_id}`:\n"
-                            "1. Call `op_list_work_packages` (with `project_id`) and `op_analyze_team_workload`.\n"
-                            "2. Group findings into:\n"
+                            f"Generate a role-aware Daily Standup Report for OpenProject project `{proj_id}`:\n"
+                            "1. Call `op_get_role_context()` first to identify the active team member role (`PM`, `BA`, `BE`, `FE`, or `TESTER`) and `user_id`.\n"
+                            "2. Call `op_list_work_packages` (with `project_id`, and `only_my_tasks=True` for the active member's queue alongside overall open items) and `op_analyze_team_workload`.\n"
+                            "3. Group findings into:\n"
+                            "   - **Active Role Focus (My Sub-tasks & Immediate Handoffs)**\n"
                             "   - **Completed / Closed Recently**\n"
                             "   - **In Progress Today** (with assignee & % done)\n"
                             "   - **Overdue / Schedule Risk Bottlenecks** (dueDate < today and still open)\n"
                             "   - **Unassigned / Overloaded Member Alerts**\n"
-                            "3. Recommend 3 concrete actions for the Scrum Master / PM today."
+                            "4. Recommend 3 concrete next actions tailored to the active role and Scrum Master / PM today."
                         ),
                     },
                 }
@@ -225,21 +234,23 @@ def get_prompt(name: str, arguments: Dict[str, Any] | None = None) -> Dict[str, 
 
     if name == "op-bug-triage":
         bug_summary = args.get("bug_summary", "<bug_summary>")
+        parent_tid = args.get("parent_task_id", "")
         return {
-            "description": f"Bug Triage workflow for project {proj_id}",
+            "description": f"3-Tier [Bug] Sub-task Triage workflow for project {proj_id}",
             "messages": [
                 {
                     "role": "user",
                     "content": {
                         "type": "text",
                         "text": (
-                            f"Triage and log the following bug in OpenProject project `{proj_id}`:\n"
-                            f"Bug Symptom: {bug_summary}\n\n"
+                            f"Triage and log the following bug in OpenProject project `{proj_id}` following our 3-Tier WBS & 0-SP Bug standard:\n"
+                            f"Bug Symptom: {bug_summary}\n"
+                            f"Parent Screen Task ID (if known): {parent_tid or 'Locate via op_list_work_packages'}\n\n"
                             "Steps:\n"
-                            "1. Call `op_list_work_packages` with `search_text` to check for existing duplicate bugs or related tasks.\n"
-                            "2. Call `op_analyze_team_workload` to identify the least overloaded developer.\n"
-                            "3. Call `op_create_work_package` with `type_id='Bug'` (or 'Task' if Bug type is not enabled), structured reproduction steps in Markdown description, appropriate priority, and assignee.\n"
-                            "4. If a related feature/task exists, call `op_create_relation` with `relation_type='relates'` or `'blocks'`."
+                            "1. Call `op_get_role_context()` to verify active role (`TESTER` or `PM`) and call `op_list_work_packages` with `search_text` to check for existing duplicate `[Bug]` Sub-tasks and identify the parent screen `Task` (`type_id=1`).\n"
+                            "2. Determine whether the defect belongs to Backend (`assignee_id='BE'` / Vũ Quốc Hiếu, `user_id=6`) or Frontend (`assignee_id='FE'` / Bùi Tuấn Thành, `user_id=7`).\n"
+                            "3. Call `op_create_work_package` with `type_id='Sub-task'` (`8`), `parent_id=<parent_task_id>`, `subject='[Bug] ...'`, `story_points=0`, structured reproduction steps in Markdown `description`, appropriate `priority_id`, and `assignee_id` ('BE' or 'FE').\n"
+                            "4. Reopen the offending `[BE]` or `[FE]` Sub-task (`type_id=8`) from `'Done'` (`12`) to `'In progress'` (`7`) via `op_update_work_package`, and post a structured 3-part handoff comment (`op_add_work_package_comment`) on the parent screen `Task` requesting `PM` (Nguyễn Trung Nghĩa, `user_id=4`) to transition the parent `Task` to `'Rework'` (`status_id=14`) (or if active role is `PM`, directly transition the parent `Task` to `'Rework'` (`status_id=14`))."
                         ),
                     },
                 }

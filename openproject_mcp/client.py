@@ -20,7 +20,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from .config import OpenProjectConfig
+from .config import (
+    ROLE_PROFILES,
+    STANDARD_STATUS_IDS,
+    STANDARD_TYPE_IDS,
+    OpenProjectConfig,
+    detect_role_from_user_dict,
+    get_role_profile,
+    normalize_member_role,
+    resolve_member_user_id,
+)
 from .hal_normalizer import extract_id_from_href
 
 
@@ -33,21 +42,26 @@ class OpenProjectAPIError(Exception):
         status_code: Optional[int] = None,
         error_identifier: Optional[str] = None,
         details: Optional[Any] = None,
+        recovery_hint: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
         self.error_identifier = error_identifier
         self.details = details
+        self.recovery_hint = recovery_hint
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result: Dict[str, Any] = {
             "error": True,
             "statusCode": self.status_code,
             "errorIdentifier": self.error_identifier,
             "message": self.message,
             "details": self.details,
         }
+        if self.recovery_hint:
+            result["recoveryHint"] = self.recovery_hint
+        return result
 
 
 class OpenProjectClient:
@@ -59,6 +73,12 @@ class OpenProjectClient:
         # In-memory cache for lookup metadata (statuses, types, priorities)
         self._cache: Dict[str, Tuple[float, Any]] = {}
         self._cache_ttl = 120.0  # 2 minutes
+        self._runtime_role_override: Optional[str] = None
+        self._detected_role: Optional[str] = None
+        self._detected_user: Optional[Dict[str, Any]] = None
+        self._role_detection_source: str = (
+            "env_config" if self.config.member_role in ROLE_PROFILES else "auto_pending"
+        )
 
     def _build_headers(self) -> Dict[str, str]:
         headers = {
@@ -334,6 +354,174 @@ class OpenProjectClient:
         raise OpenProjectAPIError(f"Failed to update work package {wp_id} due to lockVersion conflict.")
 
     # ------------------------------------------------------------------
+    # Team Role Auto-Detection, Switching & Assignee Resolution
+    # ------------------------------------------------------------------
+
+    def get_effective_role(self, allow_network: bool = True) -> str:
+        """
+        Determine the active QLDAPM team member role ('PM', 'BA', 'BE', 'FE', 'TESTER').
+        Priority:
+        1. Runtime role switch via op_switch_role
+        2. Explicit OPENPROJECT_MEMBER_ROLE in .env / OpenProjectConfig
+        3. Auto-detection from /api/v3/users/me when OPENPROJECT_MEMBER_ROLE=AUTO
+        4. Fallback to 'PM' when offline or unrecognized user
+        """
+        if self._runtime_role_override and self._runtime_role_override in ROLE_PROFILES:
+            self._role_detection_source = "runtime_switch"
+            return self._runtime_role_override
+
+        cfg_role = normalize_member_role(self.config.member_role, default="AUTO")
+        if cfg_role in ROLE_PROFILES:
+            self._role_detection_source = "env_config"
+            return cfg_role
+
+        if self._detected_role and self._detected_role in ROLE_PROFILES:
+            self._role_detection_source = "api_users_me"
+            return self._detected_role
+
+        if allow_network:
+            try:
+                me = self.get_cached("users:me", "/api/v3/users/me")
+                detected = detect_role_from_user_dict(me)
+                if detected and detected in ROLE_PROFILES:
+                    self._detected_role = detected
+                    self._detected_user = me
+                    self._role_detection_source = "api_users_me"
+                    return detected
+            except Exception:
+                pass
+
+        self._role_detection_source = "fallback_default_pm"
+        return "PM"
+
+    def switch_role(self, new_role: str, persist_to_config: bool = True) -> Dict[str, Any]:
+        """Switch the active team member role at runtime ('PM', 'BA', 'BE', 'FE', 'TESTER', or 'AUTO')."""
+        try:
+            norm = normalize_member_role(new_role, strict=True)
+        except ValueError as exc:
+            raise OpenProjectAPIError(
+                str(exc),
+                status_code=400,
+                error_identifier="mcp:InvalidParameter",
+                recovery_hint="Pass one of the valid QLDAPM role codes: 'PM', 'BA', 'BE', 'FE', 'TESTER', or 'AUTO'.",
+            ) from exc
+        if norm == "AUTO":
+            self._runtime_role_override = None
+            self._detected_role = None
+            if persist_to_config:
+                self.config.member_role = "AUTO"
+            self.get_effective_role(allow_network=True)
+        else:
+            self._runtime_role_override = norm
+            self._role_detection_source = "runtime_switch"
+            if persist_to_config:
+                self.config.member_role = norm
+        return self.get_role_context(allow_network=False)
+
+    def get_role_context(
+        self,
+        role_override: Optional[str] = None,
+        allow_network: bool = True,
+    ) -> Dict[str, Any]:
+        """Build a complete role context payload including user_id, weight, transitions, and SKILL.md path."""
+        active_role = self.get_effective_role(allow_network=allow_network)
+        if role_override and str(role_override).strip().upper() != "AUTO":
+            try:
+                target_role = normalize_member_role(role_override, strict=True)
+            except ValueError as exc:
+                raise OpenProjectAPIError(
+                    str(exc),
+                    status_code=400,
+                    error_identifier="mcp:InvalidParameter",
+                    recovery_hint="Use a valid role code ('PM', 'BA', 'BE', 'FE', 'TESTER', 'AUTO') or omit 'role' to inspect the active role.",
+                ) from exc
+        else:
+            target_role = active_role
+        profile = get_role_profile(target_role)
+        team_roster = [
+            {
+                "role": r_key,
+                "userId": r_val["user_id"],
+                "memberName": r_val["member_name"],
+                "fullNameVi": r_val["full_name_vi"],
+                "email": r_val.get("email", r_val["login"]),
+                "login": r_val["login"],
+                "subtaskPrefix": r_val["subtask_prefix"],
+                "weightRatio": r_val["weight_ratio"],
+                "skillRelativePath": r_val["skill_relative_path"],
+            }
+            for r_key, r_val in ROLE_PROFILES.items()
+        ]
+        return {
+            "activeRole": active_role,
+            "inspectedRole": target_role,
+            "configuredRoleEnv": self.config.member_role,
+            "detectionSource": self._role_detection_source,
+            "memberProfile": {
+                "role": profile["role"],
+                "title": profile["title"],
+                "userId": profile["user_id"],
+                "memberName": profile["member_name"],
+                "fullNameVi": profile["full_name_vi"],
+                "email": profile.get("email", profile["login"]),
+                "login": profile["login"],
+                "subtaskPrefix": profile["subtask_prefix"],
+                "weightPercent": profile["weight_percent"],
+                "weightRatio": profile["weight_ratio"],
+                "description": profile.get("description", ""),
+                "defaultStoryPoints": profile["default_story_points"],
+                "defaultEstimatedHoursPerScreen": profile["default_estimated_hours_per_screen"],
+            },
+            "skill": {
+                "skillName": profile["skill_name"],
+                "skillRelativePath": profile["skill_relative_path"],
+                "skillAbsolutePath": profile["skill_absolute_path"],
+                "agentsDispatcherPath": profile["agents_md_path"],
+            },
+            "permissionsAndGuardrails": {
+                "ownedTiers": profile["owned_tiers"],
+                "canCreateEpicOrTask": profile["can_create_epic_or_task"],
+                "canDeleteEpicOrTask": profile["can_delete_epic_or_task"],
+                "canTransitionEpicOrTask": profile.get("can_transition_epic_or_task", False),
+                "canCloseEpicOrTask": profile["can_close_epic_or_task"],
+                "allowedEpicTransitions": profile["allowed_epic_transitions"],
+                "allowedTaskTransitions": profile["allowed_task_transitions"],
+                "allowedSubtaskTransitions": profile["allowed_subtask_transitions"],
+            },
+            "recommendedTools": profile["recommended_tools"],
+            "teamRoster": team_roster,
+        }
+
+    def resolve_assignee_id(
+        self,
+        assignee_ref: Any,
+        default_to_active_role: bool = False,
+        allow_network_Role_detect: bool = True,
+    ) -> Optional[int | str]:
+        """
+        Resolve an assignee parameter ('me', 'tôi', 'PM', 'BA', 'BE', 'FE', 'TESTER',
+        'Nghĩa', 'Trung', 'Hiếu', 'Thành', 'Vinh', or integer ID) into an OpenProject user_id.
+        """
+        active_role = self.get_effective_role(allow_network=allow_network_Role_detect)
+        if assignee_ref is None:
+            if default_to_active_role:
+                return int(ROLE_PROFILES[active_role]["user_id"])
+            return None
+
+        resolved = resolve_member_user_id(assignee_ref, active_role=active_role)
+        if resolved is not None:
+            return resolved
+
+        raise OpenProjectAPIError(
+            f"Unknown assignee or role reference '{assignee_ref}'. "
+            "Valid values: numeric user_id (4..8), 'me'/'tôi', role codes ('PM', 'BA', 'BE', 'FE', 'TESTER'), "
+            "or team member names ('Nghĩa', 'Trung', 'Hiếu', 'Thành', 'Vinh').",
+            status_code=400,
+            error_identifier="mcp:InvalidAssigneeReference",
+            recovery_hint="Use 'me', 'PM' (4), 'BA' (5), 'BE' (6), 'FE' (7), 'TESTER' (8), or call op_get_role_context() to view teamRoster.",
+        )
+
+    # ------------------------------------------------------------------
     # Name-to-ID Lookup Resolvers (Statuses, Types, Priorities)
     # ------------------------------------------------------------------
 
@@ -341,6 +529,9 @@ class OpenProjectClient:
         if isinstance(status_id_or_name, int) or str(status_id_or_name).isdigit():
             return int(status_id_or_name)
         target = str(status_id_or_name).strip().lower()
+        if "statuses" not in self._cache and target in STANDARD_STATUS_IDS:
+            return STANDARD_STATUS_IDS[target]
+
         synonyms_map = {
             "ready": ("ready", "to do", "todo", "new"),
             "to do": ("ready", "to do", "todo", "new"),
@@ -351,19 +542,27 @@ class OpenProjectClient:
         }
         candidate_names = synonyms_map.get(target, (target,))
 
-        data = self.get_cached("statuses", "/api/v3/statuses")
-        elements = (data.get("_embedded") or {}).get("elements") or []
-        for cand in candidate_names:
-            for s in elements:
-                s_name = str(s.get("name", "")).strip().lower()
-                if s_name == cand:
-                    return int(s["id"])
-        for cand in candidate_names:
-            for s in elements:
-                s_name = str(s.get("name", "")).strip().lower()
-                if cand in s_name:
-                    return int(s["id"])
-        available = [f"{s.get('id')}:{s.get('name')}" for s in elements]
+        try:
+            data = self.get_cached("statuses", "/api/v3/statuses")
+            elements = (data.get("_embedded") or {}).get("elements") or []
+            for cand in candidate_names:
+                for s in elements:
+                    s_name = str(s.get("name", "")).strip().lower()
+                    if s_name == cand:
+                        return int(s["id"])
+            for cand in candidate_names:
+                for s in elements:
+                    s_name = str(s.get("name", "")).strip().lower()
+                    if cand in s_name:
+                        return int(s["id"])
+            available = [f"{s.get('id')}:{s.get('name')}" for s in elements]
+        except OpenProjectAPIError:
+            if target in STANDARD_STATUS_IDS:
+                return STANDARD_STATUS_IDS[target]
+            raise
+
+        if target in STANDARD_STATUS_IDS:
+            return STANDARD_STATUS_IDS[target]
         raise OpenProjectAPIError(
             f"Unknown status '{status_id_or_name}'. Available statuses: {', '.join(available)}",
             status_code=400,
@@ -373,20 +572,32 @@ class OpenProjectClient:
         if isinstance(type_id_or_name, int) or str(type_id_or_name).isdigit():
             return int(type_id_or_name)
         target = str(type_id_or_name).strip().lower()
+        cache_key = f"types:{project_id or 'global'}"
+        if cache_key not in self._cache and target in STANDARD_TYPE_IDS:
+            return STANDARD_TYPE_IDS[target]
+
         target_compact = target.replace("-", "").replace("_", "").replace(" ", "")
         path = f"/api/v3/projects/{project_id}/types" if project_id else "/api/v3/types"
-        data = self.get_cached(f"types:{project_id or 'global'}", path)
-        elements = (data.get("_embedded") or {}).get("elements") or []
-        for t in elements:
-            t_name = str(t.get("name", "")).strip().lower()
-            t_compact = t_name.replace("-", "").replace("_", "").replace(" ", "")
-            if t_name == target or t_compact == target_compact:
-                return int(t["id"])
-        for t in elements:
-            t_name = str(t.get("name", "")).strip().lower()
-            if target in t_name:
-                return int(t["id"])
-        available = [f"{t.get('id')}:{t.get('name')}" for t in elements]
+        try:
+            data = self.get_cached(cache_key, path)
+            elements = (data.get("_embedded") or {}).get("elements") or []
+            for t in elements:
+                t_name = str(t.get("name", "")).strip().lower()
+                t_compact = t_name.replace("-", "").replace("_", "").replace(" ", "")
+                if t_name == target or t_compact == target_compact:
+                    return int(t["id"])
+            for t in elements:
+                t_name = str(t.get("name", "")).strip().lower()
+                if target in t_name:
+                    return int(t["id"])
+            available = [f"{t.get('id')}:{t.get('name')}" for t in elements]
+        except OpenProjectAPIError:
+            if target in STANDARD_TYPE_IDS:
+                return STANDARD_TYPE_IDS[target]
+            raise
+
+        if target in STANDARD_TYPE_IDS:
+            return STANDARD_TYPE_IDS[target]
         raise OpenProjectAPIError(
             f"Unknown work package type '{type_id_or_name}'. Available types: {', '.join(available)}",
             status_code=400,

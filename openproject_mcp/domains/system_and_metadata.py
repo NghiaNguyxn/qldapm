@@ -5,10 +5,12 @@ Domain 1: System Diagnostics, Root Configuration, Current User, and Reference Me
 
 from __future__ import annotations
 
+from pathlib import Path
 import time
 from typing import Any, Dict, List
 
 from ..client import OpenProjectAPIError, OpenProjectClient
+from ..config import ROLE_PROFILES, detect_role_from_user_dict
 from ..hal_normalizer import extract_id_from_href, normalize_user
 from ..registry import ToolRegistry
 
@@ -19,7 +21,8 @@ def register_tools(registry: ToolRegistry) -> None:
         name="op_doctor_check",
         description=(
             "Run end-to-end diagnostics on the OpenProject connection, API v3 authentication, "
-            "user identity, server version, active security policies, and network latency."
+            "user identity, active team role context & SKILL.md routing, server version, "
+            "active security policies, and network latency."
         ),
         properties={},
         domain="system",
@@ -32,8 +35,17 @@ def register_tools(registry: ToolRegistry) -> None:
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
 
         me = client.get("/api/v3/users/me")
+        client._cache["users:me"] = (time.time(), me)
+        if not client._runtime_role_override and client.config.member_role not in ROLE_PROFILES:
+            detected = detect_role_from_user_dict(me)
+            if detected:
+                client._detected_role = detected
+                client._detected_user = me
+                client._role_detection_source = "api_users_me"
+
         statuses = client.get_cached("statuses", "/api/v3/statuses")
         types = client.get_cached("types:global", "/api/v3/types")
+        role_ctx = client.get_role_context(allow_network=False)
 
         return {
             "healthy": True,
@@ -42,6 +54,7 @@ def register_tools(registry: ToolRegistry) -> None:
             "coreVersion": root.get("coreVersion"),
             "baseUrl": client.config.base_url,
             "authenticatedUser": normalize_user(me),
+            "activeRoleContext": role_ctx,
             "securityPolicies": {
                 "readOnly": client.config.read_only,
                 "enableDeleteTools": client.config.enable_delete_tools,
@@ -50,12 +63,86 @@ def register_tools(registry: ToolRegistry) -> None:
                 "readProjectsAllowlist": client.config.read_projects_allowlist,
                 "writeProjectsAllowlist": client.config.write_projects_allowlist,
                 "defaultProjectId": client.config.default_project_id,
+                "memberRole": client.config.member_role,
             },
             "metadataCounts": {
                 "statuses": statuses.get("total", 0),
                 "types": types.get("total", 0),
             },
         }
+
+    @registry.register(
+        name="op_get_role_context",
+        description=(
+            "Retrieve the active QLDAPM team member role context ('PM', 'BA', 'BE', 'FE', 'TESTER'), "
+            "including member user_id (4..8), Gmail identity, role weight ratio (30-20-15-35), allowed 3-Tier workflow "
+            "transitions (PM exclusively transitions Epic/Task; BA/BE/FE/TESTER transition Sub-tasks and post handoff comments), "
+            "role guardrails, and exact path to the role's SKILL.md."
+        ),
+        properties={
+            "role": {
+                "type": "string",
+                "enum": ["PM", "BA", "BE", "FE", "TESTER", "AUTO"],
+                "description": (
+                    "Optional role code ('PM', 'BA', 'BE', 'FE', 'TESTER', or 'AUTO') to inspect. "
+                    "Omit to inspect the currently active role."
+                ),
+            },
+            "include_skill_markdown": {
+                "type": "boolean",
+                "description": "If true, also read and embed the full SKILL.md markdown content for the role.",
+                "default": False,
+            },
+        },
+        domain="system",
+        read_only=True,
+        idempotent=True,
+    )
+    def op_get_role_context(client: OpenProjectClient, args: Dict[str, Any]) -> Dict[str, Any]:
+        req_role = args.get("role")
+        ctx = client.get_role_context(role_override=req_role, allow_network=True)
+        if args.get("include_skill_markdown", False):
+            skill_abs = Path(ctx["skill"]["skillAbsolutePath"])
+            if skill_abs.is_file():
+                ctx["skillMarkdown"] = skill_abs.read_text(encoding="utf-8")
+            else:
+                ctx["skillMarkdown"] = None
+        return ctx
+
+    @registry.register(
+        name="op_switch_role",
+        description=(
+            "Switch the active OpenProject team member role for the current MCP session "
+            "('PM', 'BA', 'BE', 'FE', 'TESTER', or 'AUTO') to activate role-specific assignee routing, "
+            "3-Tier workflow transition guardrails (PM owns/transitions Epic & Task; BA/BE/FE/TESTER transition Sub-tasks), "
+            "and role SKILL.md guidance."
+        ),
+        properties={
+            "role": {
+                "type": "string",
+                "enum": ["PM", "BA", "BE", "FE", "TESTER", "AUTO"],
+                "description": "Target team role to activate ('PM', 'BA', 'BE', 'FE', 'TESTER', or 'AUTO').",
+            },
+        },
+        required=["role"],
+        domain="system",
+        read_only=True,
+        idempotent=True,
+    )
+    def op_switch_role(client: OpenProjectClient, args: Dict[str, Any]) -> Dict[str, Any]:
+        target_role = args["role"]
+        ctx = client.switch_role(target_role, persist_to_config=True)
+        skill_abs = Path(ctx["skill"]["skillAbsolutePath"])
+        if skill_abs.is_file():
+            ctx["skillMarkdown"] = skill_abs.read_text(encoding="utf-8")
+        else:
+            ctx["skillMarkdown"] = None
+        ctx["nextActionRequired"] = (
+            f"Active role switched to '{ctx['activeRole']}' ({ctx['memberProfile']['memberName']}, "
+            f"user_id={ctx['memberProfile']['userId']}). Follow the rules in '{ctx['skill']['skillRelativePath']}' "
+            "(loaded in skillMarkdown) and immediately continue fulfilling the user's request."
+        )
+        return ctx
 
     @registry.register(
         name="op_get_instance_configuration",
@@ -95,6 +182,7 @@ def register_tools(registry: ToolRegistry) -> None:
     def op_get_current_user(client: OpenProjectClient, args: Dict[str, Any]) -> Dict[str, Any]:
         me = client.get("/api/v3/users/me")
         return normalize_user(me)
+
 
     @registry.register(
         name="op_list_statuses",
@@ -443,13 +531,11 @@ def register_tools(registry: ToolRegistry) -> None:
         properties={
             "admin_username": {
                 "type": "string",
-                "description": "Admin login username/email for Rails Admin session.",
-                "default": "trungnv.ba@stu.ptit.edu.vn",
+                "description": "Admin login username/email for Rails Admin session (defaults to OPENPROJECT_ADMIN_USERNAME env var).",
             },
             "admin_password": {
                 "type": "string",
-                "description": "Admin login password for Rails Admin session.",
-                "default": "Ptit@2026!StrongPassword",
+                "description": "Admin login password for Rails Admin session (defaults to OPENPROJECT_ADMIN_PASSWORD env var).",
             },
         },
         domain="system",
@@ -457,13 +543,29 @@ def register_tools(registry: ToolRegistry) -> None:
         idempotent=True,
     )
     def op_admin_sync_3tier_schema(client: OpenProjectClient, args: Dict[str, Any]) -> Dict[str, Any]:
+        import os
         import re
         import httpx
 
         client.guard_write_operation(is_admin=True)
+        active_role = client.get_effective_role()
+        if active_role != "PM":
+            raise OpenProjectAPIError(
+                f"Role Guardrail Violation: Active role '{active_role}' is not permitted to run "
+                "op_admin_sync_3tier_schema. Only 'PM' (Nguyễn Trung Nghĩa, user_id=4) can synchronize "
+                "the 3-Tier workflow schema.",
+                status_code=403,
+                error_identifier="mcp:RoleGuardrailViolation",
+            )
         base = client.config.base_url
-        admin_user = str(args.get("admin_username") or "trungnv.ba@stu.ptit.edu.vn")
-        admin_pass = str(args.get("admin_password") or "Ptit@2026!StrongPassword")
+        admin_user = str(args.get("admin_username") or os.getenv("OPENPROJECT_ADMIN_USERNAME") or "").strip()
+        admin_pass = str(args.get("admin_password") or os.getenv("OPENPROJECT_ADMIN_PASSWORD") or "").strip()
+        if not admin_user or not admin_pass:
+            raise OpenProjectAPIError(
+                "admin_username and admin_password (or OPENPROJECT_ADMIN_USERNAME / OPENPROJECT_ADMIN_PASSWORD in .env) are required.",
+                status_code=400,
+                error_identifier="mcp:InvalidParameter",
+            )
 
         with httpx.Client(follow_redirects=True, timeout=30.0) as sess:
             login_html = sess.get(f"{base}/login").text

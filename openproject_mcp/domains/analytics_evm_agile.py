@@ -398,8 +398,34 @@ def register_tools(registry: ToolRegistry) -> None:
             max_items=500,
         )
         wps = [normalize_work_package(w, sanitize=False, include_description=False) for w in raw_wps]
+        wp_by_id = {int(w["id"]): w for w in wps if w.get("id") is not None}
         parent_ids = {int((w.get("parent") or {}).get("id")) for w in wps if (w.get("parent") or {}).get("id")}
-        leaf_wps = [w for w in wps if int(w["id"]) not in parent_ids] or wps
+        has_subtasks = any(
+            (w.get("type") or {}).get("id") == 8
+            or str((w.get("type") or {}).get("name") or "").strip().lower() in ("sub-task", "subtask")
+            for w in wps
+        )
+
+        def _is_container_wp(w: Dict[str, Any]) -> bool:
+            wid = int(w["id"]) if w.get("id") is not None else -1
+            if wid in parent_ids:
+                return True
+            t_id = (w.get("type") or {}).get("id")
+            t_name = str((w.get("type") or {}).get("name") or "").strip().lower()
+            subj_low = str(w.get("subject") or "").strip().lower()
+            if t_id == 5 or t_name in ("epic", "sử thi") or subj_low.startswith("[epic"):
+                return True
+            if (t_id == 1 or t_name in ("task", "nhiệm vụ")) and (
+                subj_low.startswith("[màn hình]")
+                or (
+                    has_subtasks
+                    and not subj_low.startswith(("[pm]", "[ba]", "[be]", "[fe]", "[tester]", "[qa]", "[bug]"))
+                )
+            ):
+                return True
+            return False
+
+        leaf_wps = [w for w in wps if not _is_container_wp(w)]
 
         # Determine active evaluation reference date
         active_dates = [
@@ -412,24 +438,153 @@ def register_tools(registry: ToolRegistry) -> None:
         today = _parse_date(args.get("status_date")) or (max(active_dates_clean) if active_dates_clean else date.today())
 
         role_weight_sp = {
-            "[BA]": 3.0,      # 30%
-            "[BE]": 2.0,      # 20%
-            "[FE]": 1.5,      # 15%
-            "[Tester]": 3.5,  # 35%
-            "[PM]": 3.0,
+            "[ba]": 3.0,      # 30%
+            "[be]": 2.0,      # 20%
+            "[fe]": 1.5,      # 15%
+            "[tester]": 3.5,  # 35%
+            "[qa]": 3.5,      # 35%
+            "[pm]": 3.0,
         }
+        role_ratios = {
+            "[ba]": 0.30,
+            "[be]": 0.20,
+            "[fe]": 0.15,
+            "[tester]": 0.35,
+            "[qa]": 0.35,
+        }
+        non_screen_parent_prefixes = (
+            "[requirement]",
+            "[analyst-design]",
+            "[quản trị",
+            "[go-live",
+        )
+
+        children_by_parent: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for w in leaf_wps:
+            pid = (w.get("parent") or {}).get("id")
+            if pid is not None:
+                children_by_parent[int(pid)].append(w)
+
+        def _is_ratio_split_parent(
+            parent_id: Optional[int],
+            parent_subj_low: str,
+            parent_sp: Any,
+        ) -> bool:
+            if parent_subj_low.startswith("[màn hình]"):
+                return True
+            if parent_sp is None or float(parent_sp) <= 0:
+                return False
+            p_sp = float(parent_sp)
+            if abs(p_sp - 10.0) < 1e-6 and not parent_subj_low.startswith(non_screen_parent_prefixes):
+                return True
+            if parent_id is None or parent_subj_low.startswith(non_screen_parent_prefixes):
+                return False
+            siblings = children_by_parent.get(int(parent_id), [])
+            role_siblings = []
+            for sib in siblings:
+                s_low = str(sib.get("subject") or "").strip().lower()
+                if "[bug]" in s_low:
+                    continue
+                if s_low.startswith("[pm]"):
+                    return False
+                sib_ratio = next((r for pfx, r in role_ratios.items() if s_low.startswith(pfx)), None)
+                if sib_ratio is not None:
+                    role_siblings.append((sib, sib_ratio))
+            if len(role_siblings) < 2:
+                return False
+            for sib, sib_ratio in role_siblings:
+                sib_sp = sib.get("storyPoints")
+                if sib_sp is not None and float(sib_sp) > 0:
+                    if abs(float(sib_sp) - round(p_sp * sib_ratio, 2)) > 0.6:
+                        return False
+            return True
 
         def _infer_default_sp(subj: str, est_hours: float) -> float:
+            s_low = subj.strip().lower()
             for prefix, sp_val in role_weight_sp.items():
-                if subj.startswith(prefix):
+                if s_low.startswith(prefix):
                     return sp_val
             return round(est_hours / 8.0, 1) if est_hours > 0 else 1.0
+
+        def _resolve_effective_subtask_sp(w: Dict[str, Any], subj: str, est_h: float) -> float:
+            raw_sp = w.get("storyPoints")
+            subj_low = subj.lower()
+            matched_ratio: Optional[float] = None
+            for prefix, ratio in role_ratios.items():
+                if subj_low.startswith(prefix):
+                    matched_ratio = ratio
+                    break
+
+            parent_info = w.get("parent") or {}
+            parent_id_raw = parent_info.get("id")
+            parent_id = int(parent_id_raw) if parent_id_raw is not None else None
+            parent_wp = (
+                wp_by_id.get(parent_id)
+                if parent_id is not None and parent_id in wp_by_id
+                else None
+            )
+            parent_subj = str(
+                (parent_wp or {}).get("subject") or parent_info.get("subject") or ""
+            ).strip()
+            parent_subj_low = parent_subj.lower()
+            parent_sp = (parent_wp or {}).get("storyPoints")
+            is_screen_parent = parent_subj_low.startswith("[màn hình]")
+            is_ratio_parent = _is_ratio_split_parent(parent_id, parent_subj_low, parent_sp)
+
+            if raw_sp is None or float(raw_sp) <= 0:
+                if (
+                    matched_ratio is not None
+                    and parent_sp is not None
+                    and float(parent_sp) > 0
+                    and is_ratio_parent
+                ):
+                    return round(float(parent_sp) * matched_ratio, 2)
+                return _infer_default_sp(subj, est_h)
+
+            sp_float = float(raw_sp)
+            if matched_ratio is None:
+                return sp_float
+
+            if (
+                parent_sp is not None
+                and float(parent_sp) > 0
+                and is_ratio_parent
+            ):
+                expected_sp = round(float(parent_sp) * matched_ratio, 2)
+                if abs(sp_float - expected_sp) <= 0.6:
+                    return expected_sp
+
+            if is_screen_parent or parent_wp is None:
+                if subj_low.startswith("[fe]") and sp_float in (1.0, 1.5, 2.0):
+                    return 1.5
+                if subj_low.startswith(("[tester]", "[qa]")):
+                    if is_screen_parent and sp_float in (3.0, 3.5, 4.0):
+                        return 3.5
+                    if parent_wp is None and sp_float in (3.0, 3.5):
+                        return 3.5
+
+            return sp_float
 
         cards: Dict[str, Dict[str, Any]] = {}
         total_earned_points = 0.0
         total_bugs = 0
 
         for w in leaf_wps:
+            subj = str(w.get("subject") or "").strip()
+            t_name = str((w.get("type") or {}).get("name") or "").lower()
+            st_name = str((w.get("status") or {}).get("name") or "").lower()
+            pct = float(w.get("percentageDone") or 0.0) / 100.0
+            if pct == 0.0 and st_name in ("closed", "done", "resolved"):
+                pct = 1.0
+
+            sd = _parse_date(w.get("startDate"))
+            if not include_future and pct == 0.0 and st_name in ("ready", "new") and sd and sd > today:
+                continue
+
+            is_bug = "[bug]" in subj.lower() or t_name == "bug"
+            if is_bug:
+                total_bugs += 1
+
             assignee = w.get("assignee") or {}
             u_name = assignee.get("name")
             if not u_name:
@@ -450,25 +605,12 @@ def register_tools(registry: ToolRegistry) -> None:
             c = cards[u_name]
             c["totalProjectTasks"] += 1
 
-            subj = str(w.get("subject") or "").strip()
-            t_name = str((w.get("type") or {}).get("name") or "").lower()
-            st_name = str((w.get("status") or {}).get("name") or "").lower()
-            pct = float(w.get("percentageDone") or 0.0) / 100.0
-            if pct == 0.0 and st_name in ("closed", "done", "resolved"):
-                pct = 1.0
-
-            sd = _parse_date(w.get("startDate"))
-            if not include_future and pct == 0.0 and st_name in ("ready", "new") and sd and sd > today:
-                continue
-
-            is_bug = "[bug]" in subj.lower() or t_name == "bug"
             if is_bug:
                 c["bugsAssigned"] += 1
-                total_bugs += 1
 
             c["assignedTasks"] += 1
             est_h = float(w.get("estimatedHours") or 0.0)
-            pts = 0.0 if is_bug else float(w.get("storyPoints") or _infer_default_sp(subj, est_h))
+            pts = 0.0 if is_bug else _resolve_effective_subtask_sp(w, subj, est_h)
 
             earned = round(pts * pct, 2)
             c["assignedPoints"] = round(c["assignedPoints"] + pts, 2)

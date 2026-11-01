@@ -32,7 +32,13 @@ def register_tools(registry: ToolRegistry) -> None:
         properties={
             "project_id": {"type": ["integer", "string"], "description": "Filter by project ID."},
             "work_package_id": {"type": "integer", "description": "Filter by work package ID."},
-            "user_id": {"type": ["integer", "string"], "description": "Filter by user ID or 'me'."},
+            "user_id": {
+                "type": ["integer", "string"],
+                "description": (
+                    "Filter by user ID (4..8), 'me'/'tôi' (active role's user_id), "
+                    "role code ('PM', 'BA', 'BE', 'FE', 'TESTER'), or member name ('Nghĩa', 'Trung', 'Hiếu', 'Thành', 'Vinh')."
+                ),
+            },
             "spent_on_from": {"type": "string", "description": "Start date (YYYY-MM-DD)."},
             "spent_on_to": {"type": "string", "description": "End date (YYYY-MM-DD)."},
             "max_items": {"type": "integer", "description": "Max entries to return (default 100).", "default": 100},
@@ -48,8 +54,9 @@ def register_tools(registry: ToolRegistry) -> None:
             filters.append({"project": {"operator": "=", "values": [str(args["project_id"])]}})
         if args.get("work_package_id"):
             filters.append({"work_package": {"operator": "=", "values": [str(args["work_package_id"])]}})
-        if args.get("user_id"):
-            filters.append({"user": {"operator": "=", "values": [str(args["user_id"])]}})
+        if args.get("user_id") is not None:
+            resolved_uid = client.resolve_assignee_id(args["user_id"])
+            filters.append({"user": {"operator": "=", "values": [str(resolved_uid)]}})
         if args.get("spent_on_from") and args.get("spent_on_to"):
             filters.append(
                 {"spentOn": {"operator": "<>d", "values": [args["spent_on_from"], args["spent_on_to"]]}}
@@ -116,7 +123,10 @@ def register_tools(registry: ToolRegistry) -> None:
                 "description": "Optional time entry activity ID (see op_list_time_entry_activities).",
             },
             "comment": {"type": "string", "description": "Comment describing the work performed."},
-            "user_id": {"type": "integer", "description": "Optional user ID if logging on behalf of another user."},
+            "user_id": {
+                "type": ["integer", "string"],
+                "description": "Optional user ID (4..8), 'me'/'tôi', role code, or member name if logging on behalf of a user.",
+            },
         },
         required=["work_package_id", "hours"],
         domain="time_budgets",
@@ -142,8 +152,9 @@ def register_tools(registry: ToolRegistry) -> None:
             payload["_links"]["project"] = {"href": f"/api/v3/projects/{args['project_id']}"}
         if args.get("activity_id"):
             payload["_links"]["activity"] = {"href": f"/api/v3/time_entries/activities/{args['activity_id']}"}
-        if args.get("user_id"):
-            payload["_links"]["user"] = {"href": f"/api/v3/users/{args['user_id']}"}
+        if args.get("user_id") is not None:
+            resolved_uid = client.resolve_assignee_id(args["user_id"])
+            payload["_links"]["user"] = {"href": f"/api/v3/users/{resolved_uid}"}
         if args.get("comment") is not None:
             payload["comment"] = {"raw": str(args["comment"])}
 

@@ -30,6 +30,12 @@ def list_static_resources(client: OpenProjectClient) -> List[Dict[str, Any]]:
             "mimeType": "application/json",
         },
         {
+            "uri": "openproject://role/active",
+            "name": "Active QLDAPM Member Role Context & Guardrails",
+            "description": "Active team member role (PM/BA/BE/FE/TESTER), user_id, 30-20-15-35 weight, transitions, and SKILL.md path.",
+            "mimeType": "application/json",
+        },
+        {
             "uri": "openproject://metadata/catalog",
             "name": "OpenProject Reference Metadata Catalog",
             "description": "All global statuses, work package types, priorities, and roles.",
@@ -115,6 +121,10 @@ def read_resource(uri: str, client: OpenProjectClient, registry: ToolRegistry) -
     if uri == "openproject://instance/info":
         t = registry.get_tool("op_doctor_check")
         data = t.handler(client, {}) if t else {}
+        return _wrap_json_resource(uri, data)
+
+    if uri == "openproject://role/active":
+        data = client.get_role_context(allow_network=True)
         return _wrap_json_resource(uri, data)
 
     if uri == "openproject://metadata/catalog":

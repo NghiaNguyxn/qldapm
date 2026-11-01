@@ -482,11 +482,14 @@ def build_openproject_filters(
     due_date_to: Optional[str] = None,
     active_on_date: Optional[str] = None,
     updated_since: Optional[str] = None,
+    active_role: str = "PM",
 ) -> Optional[str]:
     """
     Build a JSON-serialized OpenProject API v3 filter array string:
     [{"field": {"operator": "=", "values": ["..."]}}, ...]
     """
+    from .config import resolve_member_user_id
+
     filters: List[Dict[str, Any]] = []
 
     if raw_filters:
@@ -504,6 +507,14 @@ def build_openproject_filters(
         if isinstance(val, (list, tuple, set)):
             return [str(x) for x in val]
         return [str(val)]
+
+    def _resolve_user_list(val: Any) -> List[str]:
+        raw_items = val if isinstance(val, (list, tuple, set)) else [val]
+        resolved_items: List[str] = []
+        for item in raw_items:
+            r_uid = resolve_member_user_id(item, active_role=active_role)
+            resolved_items.append(str(r_uid if r_uid is not None else item))
+        return resolved_items
 
     if project_id is not None:
         filters.append({"project": {"operator": "=", "values": _to_str_list(project_id)}})
@@ -525,13 +536,14 @@ def build_openproject_filters(
         if str(assignee_id).lower() in ("none", "null", "unassigned"):
             filters.append({"assignee": {"operator": "!*", "values": []}})
         else:
-            filters.append({"assignee": {"operator": "=", "values": _to_str_list(assignee_id)}})
+            filters.append({"assignee": {"operator": "=", "values": _resolve_user_list(assignee_id)}})
 
     if author_id is not None:
-        filters.append({"author": {"operator": "=", "values": _to_str_list(author_id)}})
+        filters.append({"author": {"operator": "=", "values": _resolve_user_list(author_id)}})
 
     if responsible_id is not None:
-        filters.append({"responsible": {"operator": "=", "values": _to_str_list(responsible_id)}})
+        filters.append({"responsible": {"operator": "=", "values": _resolve_user_list(responsible_id)}})
+
 
     if version_id is not None:
         filters.append({"version": {"operator": "=", "values": _to_str_list(version_id)}})
