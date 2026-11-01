@@ -2,7 +2,16 @@
 
 Tệp cấu hình trung tâm này định hướng cho AI Agent khi làm việc với hệ thống **OpenProject Cloud** (`https://nghianguyxn.openproject.com`, Project ID `3`, identifier `quanlycattoc`, tên dự án `QuanLyCatToc`) thông qua **`openproject_mcp`**.
 
-Mọi thao tác của Agent trên OpenProject **BẮT BUỘC** phải tuân thủ đúng **Vai trò thành viên đang kích hoạt (`OPENPROJECT_MEMBER_ROLE`)**, nạp đúng `SKILL.md` tương ứng của vai trò đó, và tuân thủ nghiêm ngặt quy chế **WBS 3 Tầng (Epic $\rightarrow$ Task $\rightarrow$ Sub-task)** cùng **Tỷ lệ Trọng số Chuyên môn `30-20-15-35`**.
+Mọi thao tác của Agent trên OpenProject **BẮT BUỘC** phải tuân thủ đúng **Quy tắc MCP-First (Cấm dùng script ngoài)**, **Vai trò thành viên đang kích hoạt (`OPENPROJECT_MEMBER_ROLE`)**, nạp đúng `SKILL.md` tương ứng của vai trò đó, và tuân thủ nghiêm ngặt quy chế **WBS 3 Tầng (Epic $\rightarrow$ Task $\rightarrow$ Sub-task)** cùng **Tỷ lệ Trọng số Chuyên môn `30-20-15-35`**.
+
+---
+
+## 0. Quy Tắc Bất Biến Số 0: Bắt Buộc Dùng 100% MCP Tools — Cấm Tuyệt Đối Script Ngoài (`MCP-First & Zero External Scripts`)
+
+- **✅ BẮT BUỘC (`MANDATORY`):** Mọi thao tác đọc, tra cứu, tạo, sửa, xóa, chuyển trạng thái, chấm công, phân tích Gantt/EVM/KPI hoặc đồng bộ cấu hình trên OpenProject **BẮT BUỘC 100% phải gọi trực tiếp qua MCP Tools của server `openproject`** (`call_mcp_tool(ServerName="openproject", ToolName="op_...", Arguments={...})`).
+- **⛔ CẤM TUYỆT ĐỐI (`HARD BAN`):**
+  - **KHÔNG BAO GIỜ** dùng `run_command` chạy script Python bên ngoài (`python -c`, `requests`, `httpx`, hoặc khởi tạo `OpenProjectClient` từ terminal) hay tạo file `.py` tạm trong `scratch/` để gọi REST API OpenProject.
+  - Khi cần kiểm tra nhiều danh mục cùng lúc (ví dụ: `types`, `priorities`, `statuses`, `roles`, `users`, `work_packages`), hãy phát đồng thời nhiều lệnh `call_mcp_tool` (`op_list_types`, `op_list_priorities`, `op_list_statuses`, `op_list_roles`, `op_list_users`, `op_list_work_packages`...) trong cùng một lượt phản hồi.
 
 ---
 

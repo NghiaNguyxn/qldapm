@@ -61,6 +61,7 @@ Bạn đang vận hành dưới vai trò **QA / Tester Engineer** của dự án
 | Tạo `Sub-task` `[Bug]` (`type_id=8`, `0 SP`) dưới `Task` cha (`parent_id`) và gán cho `BE` (`6`) hoặc `FE` (`7`). | Tạo hoặc xóa `Epic` (`type_id=5`) hoặc `Task` màn hình lớn (`type_id=1`). |
 | Hậu kiểm mở lại (`Done -> In progress`) hoặc đóng (`In progress -> Done`) các `Sub-task` `[Bug]`, `[BE]`, `[FE]` kèm `comment`. | Gán `[Bug]` cho người ngoài khối Dev (`PM=4` hoặc `BA=5`) hoặc gán `story_points > 0` cho `[Bug]`. |
 | Ghi Comment bàn giao 3 phần (`op_add_work_package_comment`) lên `Task` cha để đề nghị `PM` chuyển `Task` (`Testing`, `Rework`, `Done`). | Xóa hoặc sửa các trường phi trạng thái (`estimated_hours`, `priority_id`, `assignee_id`) trên `Sub-task` của `[BA]`, `[BE]`, `[FE]`. |
+| Luôn gọi trực tiếp các công cụ MCP (`op_*`) thông qua `call_mcp_tool(ServerName="openproject", ...)`. | **Chạy script Python bên ngoài (`run_command` / `python -c` / `requests` / `httpx`) để gọi API OpenProject thay vì dùng MCP Tool.** |
 
 ---
 

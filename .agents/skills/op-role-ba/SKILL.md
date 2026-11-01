@@ -55,6 +55,7 @@ Bạn đang vận hành dưới vai trò **Business Analyst (BA)** của dự á
 | **Chuyển trạng thái hoặc sửa thuộc tính trực tiếp trên `Task` cha (`type_id=1`) hoặc `Epic` (`type_id=5`)** | `403 mcp:RoleTransitionNotAllowed` / `403 mcp:RoleGuardrailViolation` | Cập nhật `Sub-task` `[BA]` (`type_id=8`) sang `In progress` / `Done` và dùng `op_add_work_package_comment` trên `Task` cha để PM (`user_id=4`) chuyển trạng thái `Task` |
 | **Tạo hoặc xóa `Epic` (`type_id=5`) hoặc `Task` màn hình lớn (`type_id=1`)** | `403 mcp:RoleGuardrailViolation` | Chỉ PM (`user_id=4`) có quyền khởi tạo hoặc xóa `Epic` / `Task` |
 | **Gán các trạng thái của Task/Epic (`BA in progress`, `BA Review`...) vào `Sub-task` (`type_id=8`) hoặc nhảy cóc `READY -> Done` / `Done -> READY`** | `422 mcp:InvalidSubtaskStatus` / `422 mcp:InvalidSubtaskTransition` | `Sub-task` chỉ sử dụng 3 trạng thái `READY (1) -> In progress (7) -> Done (12)` và `Done (12) -> In progress (7)` |
+| **Chạy script Python bên ngoài (`run_command` / `python -c` / `requests` / `httpx`) thay vì gọi MCP Tools** | `Vi phạm Quy tắc Số 0 (AGENTS.md)` | **Bắt buộc 100%** sử dụng `call_mcp_tool(ServerName="openproject", ToolName="op_...", ...)` cho mọi thao tác OpenProject |
 
 ---
 

@@ -525,7 +525,8 @@ def register_tools(registry: ToolRegistry) -> None:
         description=(
             "[ADMIN] Synchronize the 3-Tier Hierarchy Types (Epic, Task, Sub-task), "
             "10 Standard Statuses (READY, In progress, BA in progress, BA Review, Dev in progress, "
-            "Ready for test, Testing, Rework, In review, Done), enable them across projects, "
+            "Ready for test, Testing, Rework, In review, Done), Standard English Priorities (Low, Normal, High, Immediate), "
+            "Standard English Roles, Time Entry Activities, remove redundant Vietnamese Types/Statuses, "
             "and configure the 3-Tier Adaptive Workflow Matrix."
         ),
         properties={
@@ -587,6 +588,142 @@ def register_tools(registry: ToolRegistry) -> None:
                     m = re.search(r'name="csrf-token" content="([^"]+)"', html_text)
                 return m.group(1) if m else ""
 
+            # 0. Standardize Priorities (7: Low, 8: Normal, 9: High, 10: Immediate) to English
+            priority_renames = {
+                7: ("Low", "1", "0"),
+                8: ("Normal", "1", "1"),
+                9: ("High", "1", "0"),
+                10: ("Immediate", "1", "0"),
+            }
+            for pid, (pname, pactive, pdef) in priority_renames.items():
+                ed_html = sess.get(f"{base}/admin/settings/work_package_priorities/{pid}/edit").text
+                tok = _csrf(ed_html)
+                if tok:
+                    color_m = re.search(r'name="enumeration\[color_id\]"[^>]*value="([^"]*)"', ed_html) or re.search(
+                        r'value="([^"]*)"[^>]*name="enumeration\[color_id\]"', ed_html
+                    )
+                    pdata = {
+                        "_method": "patch",
+                        "authenticity_token": tok,
+                        "enumeration[name]": pname,
+                        "enumeration[active]": pactive,
+                        "enumeration[is_default]": pdef,
+                    }
+                    if color_m and color_m.group(1):
+                        pdata["enumeration[color_id]"] = color_m.group(1)
+                    sess.post(f"{base}/admin/settings/work_package_priorities/{pid}", data=pdata)
+
+            # Standardize Time Entry Activities (1..6) to English
+            activity_renames = {
+                1: ("Management", "1", "1"),
+                2: ("Specification", "1", "0"),
+                3: ("Development", "1", "0"),
+                4: ("Testing", "1", "0"),
+                5: ("Support", "1", "0"),
+                6: ("Other", "1", "0"),
+            }
+            for aid, (aname, aactive, adef) in activity_renames.items():
+                ed_html = sess.get(f"{base}/admin/settings/time_entry_activities/{aid}/edit").text
+                tok = _csrf(ed_html)
+                if tok:
+                    sess.post(
+                        f"{base}/admin/settings/time_entry_activities/{aid}",
+                        data={
+                            "_method": "patch",
+                            "authenticity_token": tok,
+                            "enumeration[name]": aname,
+                            "enumeration[active]": aactive,
+                            "enumeration[is_default]": adef,
+                        },
+                    )
+
+            # Standardize Document Types (1..6) to English
+            doc_type_renames = {
+                1: ("Note", "1", "1"),
+                2: ("Idea", "1", "0"),
+                3: ("Proposal", "1", "0"),
+                4: ("Specification", "1", "0"),
+                5: ("Report", "1", "0"),
+                6: ("Documentation", "1", "0"),
+            }
+            for did, (dname, dactive, ddef) in doc_type_renames.items():
+                ed_html = sess.get(f"{base}/admin/settings/document_types/{did}/edit").text
+                tok = _csrf(ed_html)
+                if tok:
+                    sess.post(
+                        f"{base}/admin/settings/document_types/{did}",
+                        data={
+                            "_method": "patch",
+                            "authenticity_token": tok,
+                            "enumeration[name]": dname,
+                            "enumeration[active]": dactive,
+                            "enumeration[is_default]": ddef,
+                        },
+                    )
+
+            # Standardize Project Phase Definitions (1..4) to English
+            phase_renames = {
+                1: "Initiating",
+                2: "Planning",
+                3: "Executing",
+                4: "Closing",
+            }
+            for phid, phname in phase_renames.items():
+                ed_html = sess.get(f"{base}/admin/settings/project_phase_definitions/{phid}/edit").text
+                tok = _csrf(ed_html)
+                if tok:
+                    color_m = re.search(
+                        r'name="project_phase_definition\[color_id\]"[^>]*value="([^"]*)"', ed_html
+                    ) or re.search(
+                        r'value="([^"]*)"[^>]*name="project_phase_definition\[color_id\]"', ed_html
+                    )
+                    ph_data = {
+                        "_method": "patch",
+                        "authenticity_token": tok,
+                        "project_phase_definition[name]": phname,
+                        "project_phase_definition[start_gate]": "0",
+                        "project_phase_definition[finish_gate]": "0",
+                    }
+                    if color_m and color_m.group(1):
+                        ph_data["project_phase_definition[color_id]"] = color_m.group(1)
+                    sess.post(f"{base}/admin/settings/project_phase_definitions/{phid}", data=ph_data)
+
+            # Standardize Roles (1..12) to English while preserving existing permissions
+            role_renames = {
+                1: "Non member",
+                2: "Anonymous",
+                3: "Member",
+                4: "Reader",
+                5: "Project admin",
+                6: "Work package editor",
+                7: "Work package commenter",
+                8: "Work package viewer",
+                9: "Project query viewer",
+                10: "Project query editor",
+                11: "Staff and project manager",
+                12: "Standard global role",
+            }
+            for rid, rname in role_renames.items():
+                r_html = sess.get(f"{base}/admin/roles/{rid}/edit").text
+                tok = _csrf(r_html)
+                if tok and 'name="role[name]"' in r_html:
+                    checked_perms = re.findall(
+                        r'<input[^>]+name="role\[permissions\]\[\]"[^>]+value="([^"]+)"[^>]+checked="checked"',
+                        r_html,
+                    )
+                    if not checked_perms:
+                        checked_perms = re.findall(
+                            r'<input[^>]+checked="checked"[^>]+name="role\[permissions\]\[\]"[^>]+value="([^"]+)"',
+                            r_html,
+                        )
+                    r_data: Dict[str, Any] = {
+                        "_method": "patch",
+                        "authenticity_token": tok,
+                        "role[name]": rname,
+                        "role[permissions][]": checked_perms if checked_perms else [""],
+                    }
+                    sess.post(f"{base}/admin/roles/{rid}", data=r_data)
+
             # 1. Rename existing statuses & create missing statuses to match the exact 10 statuses
             existing_statuses = {
                 int(s["id"]): s["name"]
@@ -599,6 +736,15 @@ def register_tools(registry: ToolRegistry) -> None:
                 10: ("Ready for test", "0", "70", "0"),
                 12: ("Done", "1", "100", "0"),
                 14: ("Rework", "0", "40", "0"),
+                # Fallback English names for redundant default statuses in case any cannot be deleted
+                2: ("In specification", "0", "10", "0"),
+                3: ("Assigned", "0", "20", "0"),
+                4: ("Confirmed", "0", "20", "0"),
+                5: ("To be scheduled", "0", "20", "0"),
+                6: ("Scheduled", "0", "20", "0"),
+                8: ("Developed", "0", "70", "0"),
+                11: ("Test failed", "0", "70", "0"),
+                13: ("On hold", "0", "0", "0"),
             }
             for sid, (sname, is_closed, ratio, is_def) in rename_statuses.items():
                 if sid in existing_statuses:
@@ -646,20 +792,32 @@ def register_tools(registry: ToolRegistry) -> None:
                 for s in (client.get("/api/v3/statuses").get("_embedded") or {}).get("elements", [])
             }
 
-            # 2. Rename Task (1), Epic (5), and create Sub-task if missing
-            for tid, tname in [(1, "Task"), (5, "Epic")]:
+            # 2. Rename Task (1), Epic (5), Sub-task (8) and redundant types (2, 3, 4, 6, 7) to English
+            all_type_renames = [
+                (1, "Task", "1", "0", "1"),
+                (5, "Epic", "1", "0", "1"),
+                (8, "Sub-task", "1", "0", "1"),
+                (2, "Milestone", "1", "1", "0"),
+                (3, "Phase", "1", "0", "0"),
+                (4, "Feature", "1", "0", "0"),
+                (6, "User story", "1", "0", "0"),
+                (7, "Bug", "1", "0", "0"),
+            ]
+            for tid, tname, in_rm, is_ms, en_new in all_type_renames:
                 t_html = sess.get(f"{base}/types/{tid}/settings").text
-                sess.post(
-                    f"{base}/types/{tid}/details",
-                    data={
-                        "_method": "patch",
-                        "authenticity_token": _csrf(t_html),
-                        "type[name]": tname,
-                        "type[is_in_roadmap]": "1",
-                        "type[is_milestone]": "0",
-                        "type[enabled_in_new_projects]": "1",
-                    },
-                )
+                tok = _csrf(t_html)
+                if tok:
+                    sess.post(
+                        f"{base}/types/{tid}/details",
+                        data={
+                            "_method": "patch",
+                            "authenticity_token": tok,
+                            "type[name]": tname,
+                            "type[is_in_roadmap]": in_rm,
+                            "type[is_milestone]": is_ms,
+                            "type[enabled_in_new_projects]": en_new,
+                        },
+                    )
 
             client.invalidate_cache()
             types_by_name = {
@@ -686,7 +844,7 @@ def register_tools(registry: ToolRegistry) -> None:
                 for t in (client.get("/api/v3/types").get("_embedded") or {}).get("elements", [])
             }
 
-            # 3. Enable Epic, Task, Sub-task across all projects
+            # 3. Enable Epic, Task, Sub-task across all projects, and UNLINK/DELETE redundant types (2, 3, 4, 6, 7)
             for tname in ("Epic", "Task", "Sub-task"):
                 tid = types_map.get(tname)
                 if tid:
@@ -695,6 +853,26 @@ def register_tools(registry: ToolRegistry) -> None:
                         f"{base}/types/{tid}/projects/enable_all?value=1",
                         headers={"X-CSRF-Token": _csrf(p_html)},
                         data={"authenticity_token": _csrf(p_html)},
+                    )
+
+            for red_tid in (2, 3, 4, 6, 7):
+                p_html = sess.get(f"{base}/types/{red_tid}/projects/edit").text
+                tok = _csrf(p_html)
+                if tok:
+                    # Unlink from Project 3 (and Project 1, 2 if present)
+                    for proj_id in (1, 2, 3):
+                        sess.post(
+                            f"{base}/types/{red_tid}/projects/unlink?page=1&project_id={proj_id}",
+                            headers={"X-CSRF-Token": tok},
+                            data={"_method": "delete", "authenticity_token": tok},
+                        )
+                    # Attempt to delete the redundant type globally if no work packages use it
+                    t_list_html = sess.get(f"{base}/types").text
+                    tok_del = _csrf(t_list_html) or tok
+                    sess.post(
+                        f"{base}/types/{red_tid}",
+                        headers={"X-CSRF-Token": tok_del},
+                        data={"_method": "delete", "authenticity_token": tok_del},
                     )
 
             # 4. Configure 3-Tier Workflow Matrix for Epic, Task, Sub-task across Roles (3, 5, 6, 11)
@@ -759,11 +937,45 @@ def register_tools(registry: ToolRegistry) -> None:
                         form_data[f"status[{src}][{dst}][]"] = ["always"]
                 sess.post(f"{base}/types/{tid}/workflow/matrix?tab=always", data=form_data)
 
+            # 5. Delete redundant unused statuses (2, 3, 4, 5, 6, 8, 11, 13) if not referenced
+            st_list_html = sess.get(f"{base}/statuses").text
+            st_tok = _csrf(st_list_html)
+            if st_tok:
+                for red_sid in (2, 3, 4, 5, 6, 8, 11, 13):
+                    sess.post(
+                        f"{base}/statuses/{red_sid}",
+                        headers={"X-CSRF-Token": st_tok},
+                        data={"_method": "delete", "authenticity_token": st_tok},
+                    )
+
             client.invalidate_cache()
+            final_types = {
+                t["name"].strip(): int(t["id"])
+                for t in (client.get("/api/v3/types").get("_embedded") or {}).get("elements", [])
+            }
+            final_proj_types = {
+                t["name"].strip(): int(t["id"])
+                for t in (client.get("/api/v3/projects/3/types").get("_embedded") or {}).get("elements", [])
+            }
+            final_statuses = {
+                s["name"].strip(): int(s["id"])
+                for s in (client.get("/api/v3/statuses").get("_embedded") or {}).get("elements", [])
+            }
+            final_priorities = {
+                p["name"].strip(): int(p["id"])
+                for p in (client.get("/api/v3/priorities").get("_embedded") or {}).get("elements", [])
+            }
+            final_roles = {
+                r["name"].strip(): int(r["id"])
+                for r in (client.get("/api/v3/roles").get("_embedded") or {}).get("elements", [])
+            }
             return {
                 "synchronized": True,
-                "types": types_map,
-                "statuses": status_by_name,
+                "types": final_types,
+                "project3Types": final_proj_types,
+                "statuses": final_statuses,
+                "priorities": final_priorities,
+                "roles": final_roles,
             }
 
 

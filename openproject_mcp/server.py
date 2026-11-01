@@ -57,7 +57,10 @@ SERVER_INSTRUCTIONS = (
     "   - ONLY `PM` (user_id=4) is permitted to create, edit attributes, delete, or transition statuses on "
     "Tier 1 `Epic` (type_id=5) and Tier 2 `Task` (type_id=1). Non-PM roles (`BA`, `BE`, `FE`, `TESTER`) only modify "
     "and transition their Tier 3 `Sub-task` (type_id=8) items and post 3-part handoff comments (`op_add_work_package_comment`) "
-    "on the parent `Task` so `PM` transitions the parent `Task`."
+    "on the parent `Task` so `PM` transitions the parent `Task`.\n"
+    "6. MCP-FIRST & ZERO EXTERNAL SCRIPTS RULE: ALWAYS execute all OpenProject read/write/admin operations "
+    "exclusively via the registered `op_*` MCP tools (`call_mcp_tool` on `openproject`). NEVER run external Python "
+    "or shell scripts (`python -c`, `requests`, `httpx`) to call the OpenProject API."
 )
 
 

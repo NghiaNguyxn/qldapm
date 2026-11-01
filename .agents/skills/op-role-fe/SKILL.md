@@ -58,6 +58,7 @@ Bạn đang vận hành dưới vai trò **Frontend Developer (FE)** của dự 
 | Cập nhật `description`, `percentage_done`, `estimated_hours` và log giờ (`op_log_time_entry`) trên `Sub-task` `[FE]` / `[Bug]`. | Tạo hoặc xóa `Epic` (`type_id=5`) hoặc `Task` màn hình lớn (`type_id=1`). |
 | Ghi Comment bàn giao 3 phần (`op_add_work_package_comment`) lên `Task` cha để đề nghị `PM` chuyển trạng thái `Task`. | Sửa hoặc đóng `Sub-task` của thành viên khác (`[BA]`, `[BE]`, `[Tester]`). |
 | Tạo `Sub-task` `[FE]` mới dưới `Task` cha (`parent_id` bắt buộc) nếu cần tách nhỏ hạng mục Frontend. | Gán trạng thái của Task/Epic (`Dev in progress`, `Ready for test`, `In review`...) vào `Sub-task` (`type_id=8`) hoặc nhảy cóc `READY -> Done`. |
+| Luôn gọi trực tiếp các công cụ MCP (`op_*`) thông qua `call_mcp_tool(ServerName="openproject", ...)`. | **Chạy script Python bên ngoài (`run_command` / `python -c` / `requests` / `httpx`) để gọi API OpenProject thay vì dùng MCP Tool.** |
 
 ---
 

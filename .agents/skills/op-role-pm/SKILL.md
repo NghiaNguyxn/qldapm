@@ -36,7 +36,10 @@ Khi phân rã một `Task` màn hình (chuẩn `10 SP = 40 giờ` công sức) t
 
 ---
 
-## 2. Quy Trình Khởi Động Phiên Làm Việc (Session Bootstrap)
+## 2. Quy Trình Khởi Động Phiên Làm Việc (Session Bootstrap) & Quy Tắc MCP-First
+
+> [!IMPORTANT]
+> **QUY TẮC BẮT BUỘC (`MCP-First & Zero External Scripts`):** Mọi thao tác đọc, tạo, sửa, xóa, chuyển trạng thái, phân tích Gantt/EVM/KPI hoặc đồng bộ cấu hình trên OpenProject **BẮT BUỘC 100% phải gọi trực tiếp qua MCP Tools của server `openproject`** (`call_mcp_tool(ServerName="openproject", ToolName="op_...", ...)`). **TUYỆT ĐỐI CẤM** dùng `run_command` chạy script Python bên ngoài (`python -c`, `requests`, `httpx`) để gọi API OpenProject.
 
 1. **Xác nhận ngữ cảnh Role:**
    - Gọi `op_get_role_context()` để kiểm tra `activeRole == "PM"` và `userId == 4`.
